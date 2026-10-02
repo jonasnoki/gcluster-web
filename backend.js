@@ -177,6 +177,11 @@ const Backend = {
     });
   },
 
+  /** Asks the reminder function for a test notification to this user's devices. */
+  async testPush() {
+    return this.request('/functions/v1/remind', { method: 'POST', body: { test: true } });
+  },
+
   async deletePush(endpoint) {
     await this.request('/rest/v1/push_subscriptions?endpoint=eq.' + encodeURIComponent(endpoint), { method: 'DELETE' });
   },

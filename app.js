@@ -861,7 +861,14 @@ function pushPanel() {
     if (sub && Notification.permission === 'granted') {
       show(h('div', {}, 'Reminders are on for this device.'),
         h('div', { class: 'muted small' }, 'Each medication sets if it reminds on the phone.'),
-        h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { type: 'button', class: 'btn small', onclick: async () => {
+        h('div', { class: 'row wrap', style: 'margin-top:10px' }, h('button', { type: 'button', class: 'btn small', onclick: async () => {
+          try {
+            const r = await Backend.testPush();
+            toast(r.delivered ? `Test sent to ${r.delivered} device${r.delivered === 1 ? '' : 's'}` : 'No device got the test');
+          } catch (e) {
+            toast(e.status ? e.message : 'Needs a connection');
+          }
+        } }, 'Send a test'), h('button', { type: 'button', class: 'btn small ghost', onclick: async () => {
           try { await Backend.deletePush(sub.endpoint); } catch (e) { /* removed on the server later */ }
           await sub.unsubscribe();
           toast('Reminders off on this device');
