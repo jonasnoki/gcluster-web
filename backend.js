@@ -54,7 +54,7 @@ const Backend = {
     return text ? JSON.parse(text) : null;
   },
 
-  // ---- auth: a 6-digit code by email (stays inside the installed PWA)
+  // ---- auth: email and password, or a 6-digit code by email (stays inside the installed PWA)
 
   async sendCode(email) {
     // If the email has a link instead of a code, it leads back here.
@@ -83,6 +83,17 @@ const Backend = {
     const s = await this.request('/auth/v1/verify', { method: 'POST', auth: false, body: { type: 'email', email, token } });
     s.expires_at = Math.floor(Date.now() / 1000) + (s.expires_in || 3600);
     this.saveSession(s);
+  },
+
+  async signInPassword(email, password) {
+    const s = await this.request('/auth/v1/token?grant_type=password', { method: 'POST', auth: false, body: { email, password } });
+    s.expires_at = Math.floor(Date.now() / 1000) + (s.expires_in || 3600);
+    this.saveSession(s);
+  },
+
+  /** Set or change the password of the signed-in user. */
+  async setPassword(password) {
+    await this.request('/auth/v1/user', { method: 'PUT', body: { password } });
   },
 
   async freshToken() {

@@ -195,15 +195,43 @@ window.addEventListener('beforeunload', (e) => { if (dirty) e.preventDefault(); 
 
 // ------------------------------------------------------------------ sign in
 
-/** Email code sign-in: a code (not a link), so it works inside the installed app. */
+/** Sign-in: email and password, or a code by email (first time, or a forgotten password).
+ *  A code, not a link, so it works inside the installed app. */
 function viewSetup() {
-  const email = h('input', { type: 'email', id: 'se', placeholder: 'you@example.com', autocomplete: 'email', inputmode: 'email', autocapitalize: 'off', spellcheck: 'false', value: store.get('gc.email', '') });
+  let mode = store.get('gc.loginMode', 'password'); // 'password' | 'code'
+  const email = h('input', { type: 'email', id: 'se', name: 'email', placeholder: 'you@example.com', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off', spellcheck: 'false', value: store.get('gc.email', '') });
+  const pass = h('input', { type: 'password', id: 'sp', name: 'password', autocomplete: 'current-password' });
+  const passField = h('div', { class: 'field' }, h('label', { for: 'sp' }, 'Password'), pass);
   const code = h('input', { type: 'text', id: 'sc', placeholder: '123456', autocomplete: 'one-time-code', inputmode: 'numeric', maxlength: '10' });
   const codeField = h('div', { class: 'field', hidden: true }, h('label', { for: 'sc' }, 'Code from the email'), code);
   const err = h('div', { class: 'error', role: 'alert' });
   const status = h('div', { class: 'hint' });
-  const btn = h('button', { class: 'btn primary block', type: 'submit' }, 'Send code');
+  const btn = h('button', { class: 'btn primary block', type: 'submit' });
+  const intro = h('p', { class: 'muted' });
+  const switchLink = h('button', { type: 'button', class: 'linkish', onclick: () => setMode(mode === 'password' ? 'code' : 'password') });
   let sent = false;
+
+  function setMode(m) {
+    mode = m;
+    store.set('gc.loginMode', m);
+    sent = false;
+    err.textContent = ''; status.textContent = '';
+    passField.hidden = m !== 'password';
+    codeField.hidden = true;
+    btn.textContent = m === 'password' ? 'Sign in' : 'Send code';
+    intro.textContent = m === 'password'
+      ? 'Sign in with your email and password.'
+      : 'We send you a code by email. Use this the first time, or if you forgot your password.';
+    switchLink.textContent = m === 'password' ? 'No password yet, or forgot it? Sign in with an email code' : 'Sign in with a password';
+  }
+
+  async function signedIn() {
+    status.textContent = '';
+    await refresh();
+    location.hash = mode === 'code' ? '#/settings' : '#/attacks';
+    render();
+    if (mode === 'code') toast('Signed in. You can set a password under Account.');
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -212,7 +240,13 @@ function viewSetup() {
     if (!/^\S+@\S+\.\S+$/.test(addr)) { err.textContent = 'Enter your email address.'; return; }
     btn.disabled = true;
     try {
-      if (!sent) {
+      if (mode === 'password') {
+        if (!pass.value) { err.textContent = 'Enter your password.'; return; }
+        status.textContent = 'Checking…';
+        await Backend.signInPassword(addr, pass.value);
+        store.set('gc.email', addr);
+        await signedIn();
+      } else if (!sent) {
         status.textContent = 'Sending…';
         await Backend.sendCode(addr);
         store.set('gc.email', addr);
@@ -226,28 +260,59 @@ function viewSetup() {
         if (!c) { err.textContent = 'Enter the code from the email.'; return; }
         status.textContent = 'Checking…';
         await Backend.verifyCode(addr, c);
-        status.textContent = '';
-        await refresh();
-        location.hash = '#/attacks';
-        render();
+        await signedIn();
       }
     } catch (ex) {
       status.textContent = '';
-      err.textContent = ex.status ? (sent ? 'That code did not work. Check it, or send a new one.' : ex.message)
-        : 'No connection. Try again when you are online.';
+      if (!ex.status) err.textContent = 'No connection. Try again when you are online.';
+      else if (mode === 'password') err.textContent = ex.status === 400 ? 'Wrong email or password. No password yet? Sign in with an email code.' : ex.message;
+      else if (ex.status === 429) err.textContent = 'Too many emails for now (the free email service sends only a few per hour). Try again later, or sign in with a password.';
+      else err.textContent = sent ? 'That code did not work. Check it, or send a new one.' : ex.message;
     } finally {
       btn.disabled = false;
     }
   }
 
-  return h('div', {},
+  setMode(mode);
+  return h('div', { class: 'signin' },
     h('h1', {}, 'gcluster'),
-    h('p', { class: 'muted' }, 'Sign in with your email. You get a code, no password needed.'),
+    intro,
     h('form', { onsubmit: submit, autocomplete: 'on' },
       h('div', { class: 'field' }, h('label', { for: 'se' }, 'Email'), email),
-      codeField, btn, err, status,
+      passField, codeField, btn, err, status,
     ),
+    h('div', { style: 'margin-top:16px' }, switchLink),
   );
+}
+
+/** Set or change the password, for the email and password sign-in. */
+function passwordPanel(ro) {
+  const pw = h('input', { type: 'password', id: 'np', autocomplete: 'new-password', minlength: '8', disabled: ro });
+  const pw2 = h('input', { type: 'password', id: 'np2', autocomplete: 'new-password', disabled: ro });
+  const err = h('div', { class: 'error', role: 'alert' });
+  const btn = h('button', { type: 'submit', class: 'btn block', disabled: ro }, 'Save password');
+  async function submit(e) {
+    e.preventDefault();
+    err.textContent = '';
+    if (pw.value.length < 8) { err.textContent = 'Use at least 8 characters.'; return; }
+    if (pw.value !== pw2.value) { err.textContent = 'The two passwords are not the same.'; return; }
+    btn.disabled = true;
+    try {
+      await Backend.setPassword(pw.value);
+      pw.value = ''; pw2.value = '';
+      toast('Password saved');
+    } catch (ex) {
+      err.textContent = ex.status ? ex.message : 'Needs a connection';
+    } finally {
+      btn.disabled = ro;
+    }
+  }
+  // The hidden username field lets password managers save the pair.
+  return h('form', { onsubmit: submit, autocomplete: 'on' },
+    h('input', { type: 'email', name: 'email', autocomplete: 'username', value: Backend.email() || '', hidden: true, readonly: true }),
+    h('div', { class: 'field' }, h('label', { for: 'np' }, 'New password'), pw),
+    h('div', { class: 'field' }, h('label', { for: 'np2' }, 'Repeat the password'), pw2),
+    btn, err);
 }
 
 // ------------------------------------------------------------------ list
@@ -856,6 +921,7 @@ function viewSettings() {
     devicesPanel(ro),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
+    h('details', { class: 'pwbox' }, h('summary', {}, 'Set or change password'), passwordPanel(ro)),
     h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'btn danger', onclick: async () => {
         if (!confirm('Sign out and remove the saved data from this device? Your data stays in your account.')) return;
