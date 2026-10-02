@@ -82,6 +82,27 @@ export function dueReminders(meds, doses, sent, now, channel) {
   return out;
 }
 
+// ---- running attack: remind when an attack timer was left running
+
+/** Default for settings.attackReminder: after 2 h, again every hour, 3 times. */
+export const ATTACK_REMINDER = { phone: true, watch: true, after: 120, again: 60, count: 3 };
+/** An attack reminder is sent until this many minutes after it is due
+ *  (longer than for doses: the watch syncs open attacks only every 15 min). */
+export const ATTACK_WINDOW = 60;
+
+/** Which reminder (0, 1, …) for an attack that has been open for
+ *  `sinceMin` minutes is due now, or null. Reminder k is due at
+ *  `after + k * again` minutes. */
+export function attackReminderStep(cfg, sinceMin) {
+  if (!cfg || !(cfg.after > 0)) return null;
+  const count = cfg.again > 0 ? Math.max(1, cfg.count || 1) : 1;
+  for (let k = count - 1; k >= 0; k--) {
+    const t = cfg.after + k * (cfg.again || 0);
+    if (sinceMin >= t && sinceMin - t < ATTACK_WINDOW) return k;
+  }
+  return null;
+}
+
 /** "1 pill", "2 puffs", "0.5 pill" */
 export function doseText(dose, unit) {
   const u = unit || '';

@@ -836,6 +836,41 @@ function viewMedEdit(idArg) {
       } }, 'Delete medication')) : null));
 }
 
+/** Reminder for an attack timer left running; saved at once, read by the
+ *  reminder function (phone) and by the watch through its sync. */
+function attackReminderPanel(ro) {
+  const cfg = { ...Sched.ATTACK_REMINDER, ...(S.settings.attackReminder || {}) };
+  async function save(patch) {
+    Object.assign(cfg, patch);
+    try {
+      S.settings = { ...DEFAULT_SETTINGS, ...(await Backend.putSettings({ ...S.settings, attackReminder: { ...cfg } })) };
+      store.set('gc.cache.settings', S.settings);
+      toast('Saved');
+    } catch (e) {
+      toast(e.status ? e.message : 'Could not save: server not reachable');
+    }
+    draw();
+  }
+  const box = h('div', { class: 'panel' });
+  const select = (value, options, onchange) => h('select', { disabled: ro, onchange: (e) => onchange(Number(e.target.value)) },
+    options.map(([v, t]) => h('option', { value: v, selected: value === v }, t)));
+  function draw() {
+    const on = cfg.phone || cfg.watch;
+    box.replaceChildren(
+      h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'If an attack timer is still running after some time, you get a reminder to end it.'),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.phone, disabled: ro, onchange: (e) => save({ phone: e.target.checked }) }), 'On the phone'),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.watch, disabled: ro, onchange: (e) => save({ watch: e.target.checked }) }), 'On the watch'),
+      on ? h('div', { class: 'row wrap' },
+        h('div', { class: 'field grow' }, h('label', {}, 'After'),
+          select(cfg.after, [[30, '30 min'], [60, '1 hour'], [90, '1.5 hours'], [120, '2 hours'], [180, '3 hours'], [240, '4 hours']], (v) => save({ after: v }))),
+        h('div', { class: 'field grow' }, h('label', {}, 'Then again'),
+          select(cfg.again > 0 ? cfg.again : 0, [[0, 'No'], [30, 'Every 30 min, 3 times in total'], [60, 'Every hour, 3 times in total']],
+            (v) => save({ again: v, count: v > 0 ? 3 : 1 })))) : null);
+  }
+  draw();
+  return box;
+}
+
 // ------------------------------------------------------------------ phone reminders (Web Push)
 
 const urlKey = (b64) => {
@@ -1270,8 +1305,11 @@ function viewSettings() {
     h('div', { class: 'hint' }, S.lastSync ? `Last loaded ${fmtDate(S.lastSync)} ${fmtTime(S.lastSync)}.` : ''),
     h('h2', {}, 'Watch'),
     devicesPanel(ro),
-    h('h2', {}, 'Medication reminders on this device'),
+    h('h2', {}, 'Reminders on this device'),
+    h('p', { class: 'muted small' }, 'Phone reminders (medication and a running attack) need this on.'),
     pushPanel(),
+    h('h2', {}, 'Running attack reminder'),
+    attackReminderPanel(ro),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
     h('details', { class: 'pwbox' }, h('summary', {}, 'Set or change password'), passwordPanel(ro)),
