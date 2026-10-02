@@ -76,7 +76,7 @@ function fmtDur(min) {
   return `${Math.floor(min / 60)} h ${pad(min % 60)} min`;
 }
 const durMin = (a) => (a.end != null && a.start != null ? Math.max(0, Math.round((a.end - a.start) / 60)) : null);
-const peakClass = (p) => (p == null ? '' : p >= 6 ? 'high' : 'mid');
+const peakClass = (p) => (p == null ? '' : p <= 5 ? 'low' : p <= 7 ? 'mid' : 'high');
 function dayKey(sec) {
   const d = new Date(sec * 1000);
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -166,15 +166,29 @@ function render() {
   const tab = r.name === 'attack' || r.name === 'new' ? 'attacks' : r.name;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('active', a.dataset.tab === tab);
   let content;
-  switch (r.name) {
-    case 'attack': content = viewEdit(Number(r.arg)); break;
-    case 'new': content = viewEdit(null); break;
-    case 'stats': content = viewStats(); break;
-    case 'settings': content = viewSettings(); break;
-    default: content = viewList();
+  const listRoute = r.name === 'attacks' || r.name === 'attack' || r.name === 'new' || !['stats', 'settings'].includes(r.name);
+  if (WIDE.matches && listRoute) {
+    // Desktop: list and the selected attack side by side.
+    const id = r.name === 'attack' ? Number(r.arg) : null;
+    const detail = r.name === 'attack' ? viewEdit(id) : r.name === 'new' ? viewEdit(null)
+      : h('div', { class: 'empty' }, 'Select an attack, or add one with +.');
+    content = h('div', { class: 'split' }, viewList(id), h('div', { class: 'pane-detail' }, detail));
+  } else {
+    switch (r.name) {
+      case 'attack': content = viewEdit(Number(r.arg)); break;
+      case 'new': content = viewEdit(null); break;
+      case 'stats': content = viewStats(); break;
+      case 'settings': content = viewSettings(); break;
+      default: content = viewList();
+    }
   }
+  view.classList.toggle('wide-split', WIDE.matches && listRoute);
   view.replaceChildren(content);
 }
+
+/** Desktop layout from this width on (sidebar, list and detail side by side). */
+const WIDE = window.matchMedia('(min-width: 960px)');
+WIDE.addEventListener('change', () => { if (!dirty) render(); });
 
 window.addEventListener('hashchange', render);
 window.addEventListener('beforeunload', (e) => { if (dirty) e.preventDefault(); });
@@ -242,7 +256,7 @@ function peakPill(p) {
   return h('span', { class: 'pill ' + peakClass(p), title: p == null ? 'No pain level' : `Peak pain ${p}/10` }, p == null ? '–' : p);
 }
 
-function viewList() {
+function viewList(selected) {
   const items = visibleAttacks();
   const list = h('div', { class: 'list' });
   let month = null;
@@ -250,7 +264,7 @@ function viewList() {
     const m = fmtMonth(a.start);
     if (m !== month) { list.append(h('div', { class: 'month' }, m)); month = m; }
     const d = durMin(a);
-    list.append(h('a', { class: 'card', href: `#/attack/${a.id}` },
+    list.append(h('a', { class: 'card' + (a.id === selected ? ' selected' : ''), href: `#/attack/${a.id}`, 'aria-current': a.id === selected ? 'true' : null },
       h('div', { class: 'row spread' },
         h('div', { class: 'grow' },
           h('div', { class: 'date' }, fmtDate(a.start)),
@@ -268,7 +282,7 @@ function viewList() {
         : null,
     ));
   }
-  return h('div', {},
+  return h('div', { class: 'pane-list' },
     h('h1', {}, 'Attacks'),
     items.length ? list : h('div', { class: 'empty' }, S.loaded ? 'No attacks yet. Tap + to add one.' : 'Loading…'),
     S.online ? h('a', { class: 'fab', href: '#/new', 'aria-label': 'Add attack' }, '+') : null,
@@ -443,7 +457,7 @@ function viewEdit(id) {
       timeErr),
     h('div', { class: 'field' },
       h('div', { class: 'label' }, 'Peak pain'),
-      segmented('pain', Array.from({ length: 10 }, (_, i) => ({ v: i + 1, label: String(i + 1), cls: i < 5 ? 'mid' : '' })),
+      segmented('pain', Array.from({ length: 10 }, (_, i) => ({ v: i + 1, label: String(i + 1), cls: peakClass(i + 1) })),
         () => d.peak, (v) => { d.peak = v; markDirty(); }, ro),
       h('div', { class: 'hint' }, 'Tap the selected level again to clear it.')),
     h('div', { class: 'field' }, h('label', { for: 'fa' }, 'Abortive'), absel, h('div', { style: 'margin-top:8px' }, abOther)),
@@ -467,77 +481,193 @@ function viewEdit(id) {
 
 // ------------------------------------------------------------------ stats
 
-/** Single-series vertical bar chart as inline SVG. values: numbers; label(i) -> axis text or null; tip(i) -> caption. */
-function barChart(values, label, tip, { height = 150 } = {}) {
-  const W = 340, H = height, L = 24, R = 10, T = 8, B = 20;
-  const max = Math.max(1, ...values);
-  const step = max <= 4 ? 1 : Math.ceil(max / 4);
-  const top = Math.ceil(max / step) * step;
-  const pw = W - L - R, ph = H - T - B;
-  const bw = pw / values.length;
-  const gap = Math.min(2, bw * 0.25);
-  const y = (v) => T + ph - (v / top) * ph;
-  const cap = h('div', { class: 'cap' }, ' ');
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
-  for (let v = 0; v <= top; v += step) {
-    svg.append(s('line', { class: v === 0 ? 'baseline' : 'gridline', x1: L, x2: W - R, y1: y(v), y2: y(v) }));
-    svg.append(s('text', { x: L - 5, y: y(v) + 4, 'text-anchor': 'end' }, String(v)));
+const DAY = 86400;
+const MON_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const fmtDay = (sec) => new Date(sec * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+/** Local noon of the day of sec, in ms; day differences are then whole numbers. */
+const noonMs = (sec) => { const d = new Date(sec * 1000); d.setHours(12, 0, 0, 0); return d.getTime(); };
+const daysBetween = (a, b) => Math.round((noonMs(b) - noonMs(a)) / (DAY * 1000));
+function median(xs) {
+  if (!xs.length) return null;
+  const v = [...xs].sort((a, b) => a - b), m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+const niceMax = (v) => (v <= 4 ? Math.max(1, v) : v <= 10 ? Math.ceil(v / 2) * 2 : Math.ceil(v / 5) * 5);
+/** Chart width in SVG units: the real width, so text keeps its size on phones. */
+const chartW = () => Math.round(Math.min(820, Math.max(320, (document.getElementById('view').clientWidth || 360) - 40)));
+
+/** Rounded top, square base, anchored on the baseline. */
+function barPath(cx, bw, y0, hh) {
+  const r = Math.min(4, bw / 2, hh);
+  return `M${cx - bw / 2},${y0}V${y0 - hh + r}Q${cx - bw / 2},${y0 - hh} ${cx - bw / 2 + r},${y0 - hh}H${cx + bw / 2 - r}Q${cx + bw / 2},${y0 - hh} ${cx + bw / 2},${y0 - hh + r}V${y0}Z`;
+}
+
+/** Floating tooltip in a .chart box: hover with a mouse, tap on touch screens. */
+function chartTip(box, svg) {
+  const tip = h('div', { class: 'tip', hidden: true });
+  box.append(tip);
+  return (target, vx, vy, lines) => {
+    const show = () => {
+      const r = svg.getBoundingClientRect(), b = box.getBoundingClientRect(), vb = svg.viewBox.baseVal;
+      tip.replaceChildren(h('b', {}, lines[0]), ...lines.slice(1).flatMap((l) => [h('br'), l]));
+      tip.style.left = `${r.left - b.left + (vx * r.width) / vb.width}px`;
+      tip.style.top = `${r.top - b.top + (vy * r.height) / vb.height}px`;
+      tip.hidden = false;
+    };
+    target.addEventListener('pointerenter', show);
+    target.addEventListener('pointerdown', (e) => { e.stopPropagation(); show(); });
+    target.addEventListener('focus', show);
+    target.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') tip.hidden = true; });
+    target.addEventListener('blur', () => { tip.hidden = true; });
+  };
+}
+document.addEventListener('pointerdown', () => { for (const t of document.querySelectorAll('.tip')) t.hidden = true; });
+
+const painClass = (p) => (p == null ? 'p-none' : p <= 5 ? 'p-low' : p <= 7 ? 'p-mid' : 'p-high');
+
+/** Every attack as a dot by date and peak pain; the longest breaks as bands behind. */
+function timelineChart(all, gaps) {
+  const box = h('div', { class: 'chart' });
+  const W = chartW(), H = W < 500 ? 200 : 230, L = 30, R = 10, T = 12, B = 30;
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Attacks by date and peak pain' });
+  box.append(svg);
+  const first = new Date(all[0].start * 1000), now = new Date();
+  const t0 = new Date(first.getFullYear(), first.getMonth(), 1).getTime();
+  const t1 = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  const x = (ms) => L + ((ms - t0) / (t1 - t0)) * (W - L - R);
+  const y = (p) => T + ((10 - p) / 10) * (H - T - B);
+  for (const g of gaps.slice(0, 3)) {
+    // Inset 2 px on each side, so bands that share an attack stay apart.
+    const x0 = x(noonMs(g.from)) + 2, x1 = x(noonMs(g.to)) - 2;
+    if (x1 - x0 < 4) continue;
+    svg.append(s('rect', { class: 'band', x: x0, y: T, width: x1 - x0, height: H - T - B }));
+    if (x1 - x0 > 44) svg.append(s('text', { class: 'ink mono', x: (x0 + x1) / 2, y: T + 14, 'text-anchor': 'middle' }, `${g.days} d`));
   }
-  let active = null;
+  for (const v of [0, 5, 10]) {
+    svg.append(s('line', { class: 'gridline', x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+    svg.append(s('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end' }, String(v)));
+  }
+  const months = (now.getFullYear() - first.getFullYear()) * 12 + now.getMonth() - first.getMonth() + 1;
+  const every = Math.max(1, Math.ceil(months / ((W - L - R) / 48)));
+  for (let i = 0; i <= months; i++) {
+    const d = new Date(first.getFullYear(), first.getMonth() + i, 1);
+    const xx = x(d.getTime());
+    svg.append(s('line', { class: 'axis', x1: xx, x2: xx, y1: H - B, y2: H - B + 4 }));
+    if (i < months && i % every === 0) {
+      const yr = d.getMonth() === 0 || i === 0 ? ` ${String(d.getFullYear()).slice(2)}` : '';
+      svg.append(s('text', { x: xx + 2, y: H - B + 17 }, MON_SHORT[d.getMonth()] + yr));
+    }
+  }
+  svg.append(s('line', { class: 'axis', x1: L, x2: W - R, y1: H - B, y2: H - B }));
+  const tip = chartTip(box, svg);
+  for (const a of all) {
+    const cx = x(noonMs(a.start)), cy = y(a.peak ?? 0);
+    svg.append(s('circle', { class: 'dot ' + painClass(a.peak), cx, cy, r: 5.5 }));
+    const hit = s('circle', { class: 'hit', cx, cy, r: 11, tabindex: 0 });
+    hit.addEventListener('click', () => { location.hash = `#/attack/${a.id}`; });
+    const d = durMin(a);
+    tip(hit, cx, cy, [`${fmtDate(a.start)} · ${fmtTime(a.start)}`,
+      `Pain ${a.peak ?? '?'}/10${d != null ? ` · ${fmtDur(d)}` : ''}`, ...(a.abortive ? [a.abortive] : [])]);
+    svg.append(hit);
+  }
+  const legend = h('div', { class: 'legend' },
+    [['p-low', 'Pain 1–5'], ['p-mid', '6–7'], ['p-high', '8–10'], ['p-none', 'Not rated (at 0)']]
+      .map(([c, t]) => h('span', {}, h('i', { class: c }), t)),
+    gaps.length ? h('span', {}, h('i', { class: 'band' }), `The ${Math.min(3, gaps.length)} longest breaks`) : null);
+  return h('div', { class: 'panel' }, box, legend);
+}
+
+/** One rounded bar per slot, values labelled above, a tooltip per slot. */
+function barsChart({ values, label, sublabel, tipLines, height = 170, valueLabels = false, band = null, aria }) {
+  const box = h('div', { class: 'chart' });
+  const W = chartW(), H = height, L = 30, R = 10, T = band ? 26 : 16, B = sublabel ? 34 : 26;
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': aria });
+  box.append(svg);
+  const max = niceMax(Math.max(1, ...values));
+  const slot = (W - L - R) / values.length;
+  const bw = Math.max(2, Math.min(28, slot - Math.min(8, slot * 0.3)));
+  const y = (v) => T + ((max - v) / max) * (H - T - B);
+  if (band) {
+    svg.append(s('rect', { class: 'band', x: L + slot * band.from, y: T, width: slot * (band.to - band.from), height: H - T - B, rx: 4 }));
+    // The label sits above the band, so it never covers a bar.
+    svg.append(s('text', { class: 'ink', x: L + slot * band.from + 6, y: T - 8 }, band.text));
+  }
+  for (const v of [0, max / 2, max]) {
+    if (!Number.isInteger(v)) continue;
+    svg.append(s('line', { class: 'gridline', x1: L, x2: W - R, y1: y(v), y2: y(v) }));
+    svg.append(s('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end' }, String(v)));
+  }
+  const tip = chartTip(box, svg);
   values.forEach((v, i) => {
-    const x = L + i * bw + gap / 2, w = Math.max(1, bw - gap);
+    const cx = L + slot * i + slot / 2;
     if (v > 0) {
-      const yt = y(v), r = Math.min(4, w / 2, (T + ph - yt));
-      const yb = T + ph;
-      svg.append(s('path', {
-        class: 'bar', 'data-i': i,
-        d: `M${x},${yb}V${yt + r}Q${x},${yt} ${x + r},${yt}H${x + w - r}Q${x + w},${yt} ${x + w},${yt + r}V${yb}Z`,
-      }));
+      svg.append(s('path', { class: 'bar', d: barPath(cx, bw, y(0), y(0) - y(v)) }));
+      if (valueLabels && slot >= 14) svg.append(s('text', { class: 'ink mono', x: cx, y: y(v) - 5, 'text-anchor': 'middle' }, String(v)));
     }
     const lab = label(i);
-    if (lab != null) svg.append(s('text', { x: x + w / 2, y: H - 5, 'text-anchor': 'middle' }, lab));
-    const hit = s('rect', { class: 'hit', x: L + i * bw, y: T, width: bw, height: ph });
-    const show = () => {
-      if (active) active.classList.remove('on');
-      active = svg.querySelector(`.bar[data-i="${i}"]`);
-      if (active) active.classList.add('on');
-      cap.textContent = tip(i);
-    };
-    hit.addEventListener('pointerenter', show);
-    hit.addEventListener('pointerdown', show);
+    if (lab != null) svg.append(s('text', { x: cx, y: H - B + 16, 'text-anchor': 'middle' }, lab));
+    const sub = sublabel && sublabel(i);
+    if (sub != null) svg.append(s('text', { x: cx, y: H - B + 29, 'text-anchor': 'middle' }, sub));
+    const hit = s('rect', { class: 'hit', x: cx - slot / 2, y: T, width: slot, height: H - T - B });
+    tip(hit, cx, y(v), tipLines(i));
     svg.append(hit);
   });
-  svg.setAttribute('aria-label', values.map((v, i) => tip(i)).join('; '));
-  return h('div', { class: 'chart' }, svg, cap);
+  svg.append(s('line', { class: 'axis', x1: L, x2: W - R, y1: y(0), y2: y(0) }));
+  return box;
 }
 
 function viewStats() {
-  const includeUnconf = store.get('gc.stats.unconfirmed', false);
-  const all = visibleAttacks().filter((a) => includeUnconf || a.status !== 'unconfirmed');
-  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const all = visibleAttacks().slice().reverse(); // oldest first
+  const head = h('header', { class: 'stats-head' },
+    h('div', { class: 'eyebrow' }, 'Attack diary'),
+    h('h1', {}, all.length ? `Course, ${fmtMonth(all[0].start)} – ${fmtMonth(all[all.length - 1].start)}` : 'Course'));
+  if (!all.length) return h('div', { class: 'stats' }, head, h('div', { class: 'empty' }, S.loaded ? 'No attacks yet.' : 'Loading…'));
 
-  function perDay(days) {
-    const counts = new Map();
-    for (const a of all) counts.set(dayKey(a.start), (counts.get(dayKey(a.start)) || 0) + 1);
-    const out = [];
-    const today = new Date(); today.setHours(12, 0, 0, 0);
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(today); d.setDate(today.getDate() - i);
-      const sec = Math.floor(d.getTime() / 1000);
-      out.push({ sec, n: counts.get(dayKey(sec)) || 0, d });
-    }
-    return out;
-  }
-  const d14 = perDay(14), d60 = perDay(60);
-  const hours = Array(24).fill(0);
-  for (const a of all) hours[new Date(a.start * 1000).getHours()] += 1;
+  const now = nowSec();
+  const last = all[all.length - 1];
   const peaks = all.map((a) => a.peak).filter((p) => p != null);
   const durs = all.map(durMin).filter((m) => m != null);
-  const avg = (xs) => (xs.length ? xs.reduce((x, y) => x + y, 0) / xs.length : null);
-  const avgPeak = avg(peaks), avgDur = avg(durs);
-  const sum = (xs) => xs.reduce((x, y) => x + y.n, 0);
+  const hours = Array(24).fill(0);
+  for (const a of all) hours[new Date(a.start * 1000).getHours()] += 1;
+  const night = hours.slice(0, 4).reduce((x, y) => x + y, 0);
+  const since = (days) => all.filter((a) => a.start >= now - days * DAY);
+  const gaps = [];
+  for (let i = 1; i < all.length; i++) {
+    const days = daysBetween(all[i - 1].start, all[i].start);
+    if (days >= 7) gaps.push({ days, from: all[i - 1].start, to: all[i].start });
+  }
+  gaps.sort((a, b) => b.days - a.days);
+  const ab30 = new Map();
+  for (const a of since(30)) if (a.abortive) ab30.set(a.abortive, (ab30.get(a.abortive) || 0) + 1);
+  const ab30n = [...ab30.values()].reduce((x, y) => x + y, 0);
 
-  // abortive effectiveness
+  // months from the first attack to now
+  const first = new Date(all[0].start * 1000), today = new Date();
+  const nMonths = (today.getFullYear() - first.getFullYear()) * 12 + today.getMonth() - first.getMonth() + 1;
+  const months = Array.from({ length: nMonths }, (_, i) => ({ d: new Date(first.getFullYear(), first.getMonth() + i, 1), n: 0 }));
+  for (const a of all) {
+    const d = new Date(a.start * 1000);
+    months[(d.getFullYear() - first.getFullYear()) * 12 + d.getMonth() - first.getMonth()].n += 1;
+  }
+  const busiest = months.reduce((m, x) => (x.n > m.n ? x : m), months[0]);
+  const monthName = (d) => d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+  const fact = (k, ...v) => h('div', {}, h('dt', {}, k), h('dd', {}, ...v));
+  const num = (v) => h('span', { class: 'num' }, v);
+  const facts = h('dl', { class: 'facts' },
+    fact('Attacks', num(all.length), ` from ${fmtDay(all[0].start)} to ${fmtDay(last.start)}`),
+    fact('Last attack', `${fmtDay(last.start)}, `, num(daysBetween(last.start, now)), ' days ago'),
+    fact('Recent', num(since(7).length), ' in the last 7 days, ', num(since(30).length), ' in the last 30'),
+    fact('Busiest month', `${monthName(busiest.d)}: `, num(busiest.n), ' attacks'),
+    fact('Longest break', gaps.length ? [num(gaps[0].days), ` days, ${fmtDay(gaps[0].from)} – ${fmtDay(gaps[0].to)}`] : 'None of 7 days or more'),
+    fact('Time of day', num(night), ' of ', num(all.length), ' start between 00:00 and 04:00'),
+    fact('Pain', peaks.length ? ['Median ', num(median(peaks)), '/10, range ', num(`${Math.min(...peaks)}–${Math.max(...peaks)}`)] : 'Not rated yet'),
+    fact('Duration', durs.length ? ['Median ', num(fmtDur(Math.round(median(durs)))), ', range ', num(`${Math.min(...durs)}–${Math.max(...durs)}`), ' min'] : 'No ended attacks'),
+    fact('Abortives, 30 days', ab30n ? [num(ab30n), ' uses: ', [...ab30.entries()].map(([n, c]) => `${c} ${n}`).join(', ')] : 'None'),
+  );
+
+  // abortive effect table
   const ab = new Map();
   for (const a of all) {
     if (!a.abortive) continue;
@@ -548,55 +678,59 @@ function viewStats() {
     ab.set(a.abortive, e);
   }
   const abRows = [...ab.entries()].sort((x, y) => y[1].n - x[1].n);
+  const untreated = all.filter((a) => !a.abortive).length;
+  const td = (v, cls = 'r num') => h('td', { class: cls || null }, v);
+  const medTable = h('div', { class: 'scroll' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', {}, 'Abortive'), h('th', { class: 'r' }, 'Uses'), h('th', { class: 'r' }, 'Worked'),
+      h('th', { class: 'r' }, 'Partly'), h('th', { class: 'r' }, 'Did not work'), h('th', { class: 'r' }, 'Not rated'), h('th', { class: 'r' }, 'Relief'))),
+    h('tbody', {}, abRows.map(([name, e]) => h('tr', {}, td(name, ''), td(e.n), td(e[2]), td(e[1]), td(e[0]), td(e.none),
+      td(e.relief.length ? `${Math.round(median(e.relief))} min` : '–'))))));
 
-  const tile = (v, k) => h('div', { class: 'tile' }, h('div', { class: 'v' }, v), h('div', { class: 'k' }, k));
-  const dayTip = (arr) => (i) => `${arr[i].d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}: ${plural(arr[i].n, 'attack')}`;
+  // triggers
+  const tags = new Map();
+  for (const a of all) for (const t of a.tags || []) tags.set(t, (tags.get(t) || 0) + 1);
+  const tagRows = [...tags.entries()].sort((x, y) => y[1] - x[1]);
 
-  return h('div', {},
-    h('h1', {}, 'Stats'),
-    h('label', { class: 'toggle' },
-      h('input', { type: 'checkbox', checked: includeUnconf, onchange: (e) => { store.set('gc.stats.unconfirmed', e.target.checked); render(); } }),
-      'Include unconfirmed detections'),
-    h('div', { class: 'tiles' },
-      tile(sum(d14.slice(-7)), 'last 7 days'),
-      tile(sum(d14), 'last 14 days'),
-      tile(sum(d60), 'last 60 days'),
-      tile(avgPeak == null ? '–' : avgPeak.toFixed(1), `avg peak (${peaks.length} rated)`),
-      tile(avgDur == null ? '–' : fmtDur(Math.round(avgDur)), `avg duration (${durs.length} ended)`),
-      tile(all.length, 'attacks in total')),
-    h('h2', {}, 'Attacks per day, last 14 days'),
-    barChart(d14.map((x) => x.n), (i) => (i % 2 === 1 ? String(d14[i].d.getDate()) : null), dayTip(d14)),
-    h('h2', {}, 'Attacks per day, last 60 days'),
-    barChart(d60.map((x) => x.n), (i) => (d60[i].d.getDay() === 1 ? String(d60[i].d.getDate()) + '.' : null), dayTip(d60), { height: 130 }),
-    h('div', { class: 'hint' }, 'Labels mark Mondays.'),
-    h('h2', {}, 'Attacks by hour of day (onset)'),
-    barChart(hours, (i) => (i % 3 === 0 ? String(i) : null), (i) => `${pad(i)}:00–${pad(i)}:59: ${plural(hours[i], 'attack')}`),
-    h('h2', {}, 'Abortive effectiveness'),
-    abRows.length
-      ? h('div', { class: 'panel' },
-        h('div', { class: 'legend' },
-          h('span', {}, h('i', { style: 'background:var(--good)' }), 'worked'),
-          h('span', {}, h('i', { style: 'background:var(--warn)' }), 'partly'),
-          h('span', {}, h('i', { style: 'background:var(--bad)' }), 'did not work'),
-          h('span', {}, h('i', { style: 'background:var(--unknown)' }), 'not rated')),
-        h('div', { class: 'eff', style: 'margin-top:12px' }, abRows.map(([name, e]) => {
-          const rated = e[0] + e[1] + e[2];
-          const r = avg(e.relief);
-          return h('div', {},
-            h('div', { class: 'row spread' }, h('span', { class: 'name' }, name), h('span', { class: 'muted small' }, plural(e.n, 'use'))),
-            h('div', { class: 'stack', role: 'img', 'aria-label': `${name}: worked ${e[2]}, partly ${e[1]}, did not work ${e[0]}, not rated ${e.none}` },
-              [['s2', e[2]], ['s1', e[1]], ['s0', e[0]], ['sn', e.none]].filter(([, n]) => n > 0)
-                .map(([c, n]) => h('i', { class: c, style: `flex:${n}` }))),
-            h('div', { class: 'muted small' },
-              rated ? `worked ${Math.round((e[2] / rated) * 100)}% · partly ${Math.round((e[1] / rated) * 100)}% · did not work ${Math.round((e[0] / rated) * 100)}%` : 'no ratings yet',
-              r != null ? ` · relief after ${Math.round(r)} min on average` : ''));
-        })))
-      : h('div', { class: 'hint' }, 'No abortives recorded yet.'),
-    h('details', {},
-      h('summary', {}, 'Show attacks by hour as a table'),
-      h('table', { class: 'data' },
-        h('thead', {}, h('tr', {}, h('th', {}, 'Hour'), h('th', {}, 'Attacks'))),
-        h('tbody', {}, hours.map((n, i) => h('tr', {}, h('td', {}, `${pad(i)}:00`), h('td', {}, n)))))),
+  const pad2 = (i) => String(i).padStart(2, '0');
+  return h('div', { class: 'stats' },
+    head,
+    h('section', {}, h('h2', {}, 'Key facts'), facts),
+    h('section', {},
+      h('h2', {}, 'Course'),
+      h('p', { class: 'lead' }, 'Each dot is an attack, by date and peak pain. Shaded: the longest breaks without an attack.'),
+      timelineChart(all, gaps),
+      h('div', { class: 'panel' },
+        h('div', { class: 'small muted' }, 'Attacks per month'),
+        barsChart({
+          values: months.map((m) => m.n), valueLabels: true, aria: 'Attacks per month',
+          label: (i) => (nMonths <= 24 || i % 3 === 0 ? MON_SHORT[months[i].d.getMonth()].slice(0, nMonths > 12 ? 1 : 3) : null),
+          sublabel: (i) => (months[i].d.getMonth() === 0 || i === 0 ? String(months[i].d.getFullYear()) : null),
+          tipLines: (i) => [monthName(months[i].d), plural(months[i].n, 'attack')],
+        })),
+      gaps.length ? h('div', { class: 'scroll' }, h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Longest breaks'), h('th', { class: 'r' }, 'Days'))),
+        h('tbody', {}, gaps.slice(0, 5).map((g) => h('tr', {}, td(`${fmtDay(g.from)} – ${fmtDay(g.to)}`, ''), td(g.days)))))) : null),
+    h('section', {},
+      h('h2', {}, 'Time of day'),
+      h('p', { class: 'lead' }, `Onset of all ${all.length} attacks by hour.`),
+      h('div', { class: 'panel' }, barsChart({
+        values: hours, aria: 'Attacks by hour of onset',
+        band: { from: 0, to: 4, text: `00–04: ${night} of ${all.length}` },
+        label: (i) => (i % 3 === 0 ? pad2(i) : null),
+        tipLines: (i) => [`${pad2(i)}:00–${pad2(i)}:59`, plural(hours[i], 'attack')],
+      }))),
+    h('section', {},
+      h('h2', {}, 'Abortives and effect'),
+      h('p', { class: 'lead' }, 'Your own rating after each use. Relief: median minutes from the abortive to relief.'),
+      abRows.length ? medTable : h('p', { class: 'muted' }, 'No abortives recorded yet.'),
+      untreated ? h('p', { class: 'small muted' }, `Without an abortive: ${plural(untreated, 'attack')}.`) : null),
+    h('section', {},
+      h('h2', {}, 'Possible triggers'),
+      h('p', { class: 'lead' }, 'Tags set when logging; an attack can have several, most have none.'),
+      tagRows.length
+        ? h('div', { class: 'bars' }, tagRows.map(([t, n]) => h('div', { class: 'bar-row' },
+          h('span', {}, t), h('span', { class: 'track' }, h('span', { class: 'fill', style: `width:${(n / tagRows[0][1]) * 100}%` })), h('span', { class: 'num' }, n))))
+        : h('p', { class: 'muted' }, 'No tags recorded yet.')),
   );
 }
 
