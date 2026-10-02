@@ -1,8 +1,8 @@
 /* gcluster service worker: cache the app shell. Data comes from Supabase;
  * the app keeps its own offline copy in localStorage. */
-const VERSION = 'gcluster-v5';
+const VERSION = 'gcluster-v6';
 const SHELL = [
-  './', 'index.html', 'config.js', 'backend.js', 'app.js', 'style.css', 'manifest.webmanifest',
+  './', 'index.html', 'config.js', 'backend.js', 'schedule.js', 'app.js', 'style.css', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 
@@ -39,4 +39,29 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   // Only the app's own files; API calls always go to the network.
   if (new URL(req.url).origin === self.location.origin) e.respondWith(shellFirst(req));
+});
+
+// Medication reminders from the `remind` function (Web Push).
+self.addEventListener('push', (e) => {
+  let msg = {};
+  try { msg = e.data ? e.data.json() : {}; } catch (err) { msg = { title: 'gcluster', body: e.data && e.data.text() }; }
+  e.waitUntil(self.registration.showNotification(msg.title || 'gcluster', {
+    body: msg.body || '',
+    tag: msg.tag, // a later reminder for the same dose replaces the earlier one
+    renotify: !!msg.tag,
+    icon: 'icons/icon-192.png',
+    badge: 'icons/icon-192.png',
+    data: { url: msg.url || './#/meds' },
+  }));
+});
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data && e.notification.data.url || './#/meds', self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+    for (const c of list) {
+      if (c.url.startsWith(self.registration.scope)) return c.focus().then(() => c.navigate(url));
+    }
+    return self.clients.openWindow(url);
+  }));
 });

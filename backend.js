@@ -133,6 +133,54 @@ const Backend = {
     return this.putAttack({ ...a, deleted: true });
   },
 
+  // ---- medications (schedules) and doses (taken or skipped); tombstones like attacks
+
+  async listMeds() {
+    const rows = await this.request('/rest/v1/medications?select=data&deleted=eq.false&order=id');
+    return rows.map((r) => r.data);
+  },
+
+  async putMed(m) {
+    const data = { ...m, updatedAt: Math.max(m.updatedAt || 0, Math.floor(Date.now() / 1000)) };
+    const rows = await this.request('/rest/v1/medications?on_conflict=user_id,id', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: [{ user_id: this.userId(), id: m.id, updated_at: data.updatedAt, data }],
+    });
+    return rows[0].data;
+  },
+
+  /** Doses from this local day ("YYYY-MM-DD") on, tombstones included. */
+  async listDoses(fromDay) {
+    const rows = await this.request('/rest/v1/doses?select=data&day=gte.' + encodeURIComponent(fromDay));
+    return rows.map((r) => r.data);
+  },
+
+  async putDose(d) {
+    const data = { ...d, updatedAt: Math.max(d.updatedAt || 0, Math.floor(Date.now() / 1000)) };
+    const rows = await this.request('/rest/v1/doses?on_conflict=user_id,id', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: [{ user_id: this.userId(), id: d.id, med_id: d.medId, day: d.day, updated_at: data.updatedAt, data }],
+    });
+    return rows[0].data;
+  },
+
+  // ---- push subscriptions (phone reminders)
+
+  async savePush(sub, label) {
+    const j = sub.toJSON();
+    await this.request('/rest/v1/push_subscriptions?on_conflict=endpoint', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [{ user_id: this.userId(), endpoint: j.endpoint, keys: j.keys, label }],
+    });
+  },
+
+  async deletePush(endpoint) {
+    await this.request('/rest/v1/push_subscriptions?endpoint=eq.' + encodeURIComponent(endpoint), { method: 'DELETE' });
+  },
+
   // ---- settings (abortive and tag lists for the forms)
 
   async getSettings() {

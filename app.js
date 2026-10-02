@@ -1,5 +1,6 @@
-/* gcluster companion web app. Plain JS, no build step. Data: Supabase via backend.js. */
-'use strict';
+/* gcluster companion web app. Plain JS, no build step. Data: Supabase via backend.js.
+ * An ES module (for schedule.js); config.js and backend.js are classic scripts before it. */
+import * as Sched from './schedule.js';
 
 // ------------------------------------------------------------------ utilities
 
@@ -95,6 +96,8 @@ function toast(msg) {
 
 const S = {
   attacks: store.get('gc.cache.attacks', []), // includes tombstones
+  meds: store.get('gc.cache.meds', []),
+  doses: store.get('gc.cache.doses', []), // the last DOSE_DAYS days, tombstones included
   settings: store.get('gc.cache.settings', DEFAULT_SETTINGS),
   online: true,
   loaded: false,
@@ -115,9 +118,19 @@ function setOnline(on) {
 async function refresh() {
   if (!Backend.signedIn()) return;
   try {
-    const [list, settings] = await Promise.all([Backend.listAttacks(), Backend.getSettings()]);
+    const [list, settings, meds, doses] = await Promise.all([Backend.listAttacks(), Backend.getSettings(),
+      Backend.listMeds(), Backend.listDoses(Sched.addDays(todayStr(), -(DOSE_DAYS - 1)))]);
     S.attacks = list || [];
     S.settings = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+    S.meds = meds || [];
+    S.doses = doses || [];
+    store.set('gc.cache.meds', S.meds);
+    store.set('gc.cache.doses', S.doses);
+    // The phone reminders are sent by the server; it needs the local time zone.
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz && S.settings.tz !== tz) {
+      S.settings = { ...DEFAULT_SETTINGS, ...(await Backend.putSettings({ ...S.settings, tz })) };
+    }
     S.lastSync = nowSec();
     store.set('gc.cache.attacks', S.attacks);
     store.set('gc.cache.settings', S.settings);
@@ -163,10 +176,10 @@ function render() {
     return;
   }
   tabs.hidden = false;
-  const tab = r.name === 'attack' || r.name === 'new' ? 'attacks' : r.name;
+  const tab = r.name === 'attack' || r.name === 'new' ? 'attacks' : r.name === 'med' ? 'meds' : r.name;
   for (const a of tabs.querySelectorAll('a')) a.classList.toggle('active', a.dataset.tab === tab);
   let content;
-  const listRoute = r.name === 'attacks' || r.name === 'attack' || r.name === 'new' || !['stats', 'settings'].includes(r.name);
+  const listRoute = !['stats', 'settings', 'meds', 'med'].includes(r.name);
   if (WIDE.matches && listRoute) {
     // Desktop: list and the selected attack side by side.
     const id = r.name === 'attack' ? Number(r.arg) : null;
@@ -177,6 +190,8 @@ function render() {
     switch (r.name) {
       case 'attack': content = viewEdit(Number(r.arg)); break;
       case 'new': content = viewEdit(null); break;
+      case 'meds': content = viewMeds(r.arg); break;
+      case 'med': content = viewMedEdit(r.arg); break;
       case 'stats': content = viewStats(); break;
       case 'settings': content = viewSettings(); break;
       default: content = viewList();
@@ -542,6 +557,335 @@ function viewEdit(id) {
       h('a', { class: 'back', href: '#/attacks', 'aria-label': 'Back' }, '‹'),
       h('h1', {}, orig ? fmtDate(orig.start) : 'New attack')),
     form);
+}
+
+// ------------------------------------------------------------------ medication
+
+const WEEKDAYS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const UNITS = ['pill', 'puff', 'piece', 'drop', 'injection', 'ml', 'mg', 'sachet'];
+/** Doses loaded for this many days back (history and adherence). */
+const DOSE_DAYS = 30;
+const todayStr = () => Sched.dayOf(new Date());
+const visibleMeds = () => S.meds.filter((m) => !m.deleted).sort((a, b) => a.name.localeCompare(b.name));
+const doseMap = () => Object.fromEntries(S.doses.map((d) => [d.id, d]));
+const fmtDayLong = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+const fmtDayShort = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+
+function upsertDoseLocal(d) {
+  const i = S.doses.findIndex((x) => x.id === d.id);
+  if (i >= 0) S.doses[i] = d; else S.doses.push(d);
+  store.set('gc.cache.doses', S.doses);
+}
+
+async function saveDose(d) {
+  try {
+    upsertDoseLocal(await Backend.putDose(d));
+    render();
+  } catch (e) {
+    if (!e.status) setOnline(false);
+    toast(e.status ? e.message : 'Could not save: server not reachable');
+  }
+}
+
+/** A dose is open (not taken, not skipped) and its time has passed. */
+function overdue(dose, rec, now) {
+  if (rec && !rec.deleted) return false;
+  return dose.day < now.day || (dose.day === now.day && Sched.minutesOf(dose.at) <= now.min);
+}
+
+function doseRow(d, rec, now, ro) {
+  const done = rec && !rec.deleted ? rec : null;
+  const mark = (status) => saveDose({
+    id: d.id, medId: d.med.id, day: d.day, at: d.at, dose: d.dose, status,
+    // Today: the real time. An earlier day: the scheduled time, since that is the best guess.
+    takenAt: status !== 'taken' ? null : d.day === now.day ? nowSec() : Math.floor(new Date(`${d.day}T${d.at}:00`).getTime() / 1000),
+    deleted: false,
+  });
+  let state;
+  if (!done) {
+    state = h('div', { class: 'dose-actions' },
+      h('button', { type: 'button', class: 'btn small primary', disabled: ro, onclick: () => mark('taken') }, 'Taken'),
+      h('button', { type: 'button', class: 'btn small ghost', disabled: ro, onclick: () => mark('skipped') }, 'Skip'));
+  } else {
+    const takenIn = h('input', { type: 'time', class: 'taken-at', value: done.takenAt ? fmtHM(done.takenAt) : d.at, disabled: ro,
+      'aria-label': 'Taken at', onchange: (e) => {
+        if (!e.target.value) return;
+        saveDose({ ...done, takenAt: Math.floor(new Date(`${d.day}T${e.target.value}:00`).getTime() / 1000) });
+      } });
+    state = h('div', { class: 'dose-actions' },
+      done.status === 'taken' ? h('span', { class: 'done' }, '✓ Taken ', takenIn) : h('span', { class: 'muted' }, 'Skipped'),
+      h('button', { type: 'button', class: 'btn small ghost', disabled: ro, onclick: () => saveDose({ ...done, deleted: true }) }, 'Undo'));
+  }
+  return h('div', { class: 'dose' + (overdue(d, rec, now) ? ' overdue' : '') + (done ? ' is-done' : '') },
+    h('div', { class: 'grow' },
+      h('div', { class: 'name' }, d.med.name),
+      h('div', { class: 'muted small' }, Sched.doseText(d.dose, d.med.unit), overdue(d, rec, now) ? ' · open' : '')),
+    state);
+}
+const fmtHM = (sec) => { const t = new Date(sec * 1000); return `${pad(t.getHours())}:${pad(t.getMinutes())}`; };
+
+/** Last 14 days per medication: one cell per day, taken / skipped / open. */
+function adherence(meds, doses, now) {
+  const days = Array.from({ length: 14 }, (_, i) => Sched.addDays(now.day, i - 13));
+  const rows = meds.map((m) => {
+    let due = 0, taken = 0;
+    const cells = days.map((day) => {
+      const list = Sched.dosesOn([m], day).filter((d) => overdue(d, null, now));
+      if (!list.length) return h('i', { class: 'cell none', title: `${fmtDayShort(day)}: not scheduled` });
+      const t = list.filter((d) => doses[d.id] && !doses[d.id].deleted && doses[d.id].status === 'taken').length;
+      const sk = list.filter((d) => doses[d.id] && !doses[d.id].deleted && doses[d.id].status === 'skipped').length;
+      due += list.length; taken += t;
+      const cls = t === list.length ? 'all' : t + sk === list.length ? 'skip' : t > 0 ? 'part' : 'miss';
+      return h('i', { class: 'cell ' + cls, title: `${fmtDayShort(day)}: ${t} of ${list.length} taken${sk ? `, ${sk} skipped` : ''}` });
+    });
+    return h('div', { class: 'adh-row' },
+      h('span', { class: 'name' }, m.name),
+      h('span', { class: 'cells' }, cells),
+      h('span', { class: 'num small' }, due ? `${taken}/${due}` : '–'));
+  });
+  return h('div', { class: 'panel' },
+    rows,
+    h('div', { class: 'legend' },
+      h('span', {}, h('i', { class: 'cell all' }), 'all taken'),
+      h('span', {}, h('i', { class: 'cell part' }), 'some'),
+      h('span', {}, h('i', { class: 'cell skip' }), 'skipped'),
+      h('span', {}, h('i', { class: 'cell miss' }), 'not logged')));
+}
+
+function viewMeds(dayArg) {
+  const now = Sched.localNow();
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(dayArg || '') ? dayArg : now.day;
+  const ro = !S.online;
+  const meds = visibleMeds();
+  const doses = doseMap();
+  const list = Sched.dosesOn(meds, day);
+  const minDay = Sched.addDays(now.day, -(DOSE_DAYS - 1));
+
+  const groups = h('div', { class: 'doses' });
+  let at = null;
+  for (const d of list) {
+    if (d.at !== at) { groups.append(h('div', { class: 'month' }, d.at)); at = d.at; }
+    groups.append(doseRow(d, doses[d.id], now, ro));
+  }
+  const nav = (n) => {
+    const t = Sched.addDays(day, n);
+    return t > now.day || t < minDay ? null : `#/meds/${t}`;
+  };
+  const prev = nav(-1), next = nav(1);
+  return h('div', { class: 'meds' },
+    h('div', { class: 'eyebrow' }, 'Medication'),
+    h('div', { class: 'daynav' },
+      prev ? h('a', { class: 'back', href: prev, 'aria-label': 'Day before' }, '‹') : h('span', { class: 'back' }),
+      h('h1', {}, day === now.day ? 'Today' : day === Sched.addDays(now.day, -1) ? 'Yesterday' : fmtDayShort(day),
+        h('span', { class: 'muted sub' }, fmtDayLong(day))),
+      next ? h('a', { class: 'back', href: next, 'aria-label': 'Next day' }, '›') : h('span', { class: 'back' })),
+    !meds.length
+      ? h('div', { class: 'empty' }, S.loaded ? 'No medication yet. Add one below.' : 'Loading…')
+      : list.length ? groups : h('div', { class: 'empty' }, 'Nothing scheduled on this day.'),
+    meds.length ? [h('h2', {}, 'Last 14 days'), adherence(meds, doses, now)] : null,
+    h('h2', {}, 'Medications'),
+    h('div', { class: 'list' }, meds.map((m) => h('a', { class: 'card', href: `#/med/${m.id}` },
+      h('div', { class: 'row spread' },
+        h('div', { class: 'grow' },
+          h('div', { class: 'date' }, m.name, m.paused ? h('span', { class: 'badge', style: 'margin-left:8px' }, 'paused') : null),
+          h('div', { class: 'time' }, (m.times || []).map((t) => `${t.at} ${Sched.doseText(t.dose, m.unit)}`).join(' · ')),
+          h('div', { class: 'muted small' }, repeatText(m), ' · ', remindText(m))))))),
+    h('div', { style: 'margin-top:12px' }, h('a', { class: 'btn block', href: '#/med/new', 'aria-disabled': ro ? 'true' : null }, '+ Add medication')),
+  );
+}
+
+function repeatText(m) {
+  if (m.repeat === 'weekdays') return (m.weekdays || []).map((w) => WEEKDAYS[w - 1]).join(', ') || 'no days';
+  if (m.repeat === 'interval') return `every ${m.interval || 1} days`;
+  return 'every day';
+}
+function remindText(m) {
+  const r = m.remind || {};
+  const where = [r.phone ? 'phone' : null, r.watch ? 'watch' : null].filter(Boolean);
+  if (!where.length) return 'no reminder';
+  return `reminder on ${where.join(' and ')}${r.again > 0 ? `, again every ${r.again} min (${r.count}×)` : ''}`;
+}
+
+function newMed() {
+  return {
+    id: null, name: '', unit: 'pill', times: [{ at: '08:00', dose: 1 }], repeat: 'daily', weekdays: [1, 2, 3, 4, 5, 6, 7], interval: 2,
+    start: todayStr(), end: null, paused: false, remind: { phone: true, watch: true, again: 30, count: 3 }, notes: null, deleted: false,
+  };
+}
+
+function viewMedEdit(idArg) {
+  const orig = idArg === 'new' ? null : S.meds.find((m) => String(m.id) === idArg && !m.deleted);
+  if (idArg !== 'new' && !orig) return h('div', {}, h('p', { class: 'empty' }, 'Medication not found.'), h('a', { class: 'btn block', href: '#/meds' }, 'Back'));
+  const m = orig ? JSON.parse(JSON.stringify(orig)) : newMed();
+  m.remind = { phone: false, watch: false, again: 0, count: 1, ...(m.remind || {}) };
+  if (!(m.weekdays || []).length) m.weekdays = [1, 2, 3, 4, 5, 6, 7];
+  const ro = !S.online;
+  const markDirty = () => { dirty = true; };
+  const err = h('div', { class: 'error', role: 'alert' });
+
+  const name = h('input', { type: 'text', id: 'mn', value: m.name, disabled: ro, oninput: markDirty, placeholder: 'e.g. Verapamil 120 mg' });
+  const unit = h('input', { type: 'text', id: 'mu', value: m.unit || '', disabled: ro, oninput: markDirty, list: 'units' });
+  const units = h('datalist', { id: 'units' }, UNITS.map((u) => h('option', { value: u })));
+
+  const timesBox = h('div', { class: 'times' });
+  function drawTimes() {
+    timesBox.replaceChildren(...m.times.map((t, i) => h('div', { class: 'row' },
+      h('input', { type: 'time', value: t.at, disabled: ro, 'aria-label': 'Time', onchange: (e) => { t.at = e.target.value || t.at; markDirty(); } }),
+      h('input', { type: 'number', value: t.dose, min: '0', step: '0.5', inputmode: 'decimal', disabled: ro, 'aria-label': 'Dose', class: 'dose-in',
+        oninput: (e) => { t.dose = Number(e.target.value) || 0; markDirty(); } }),
+      h('button', { type: 'button', class: 'btn small ghost', disabled: ro || m.times.length < 2, 'aria-label': 'Remove time',
+        onclick: () => { m.times.splice(i, 1); drawTimes(); markDirty(); } }, '×'))));
+  }
+  drawTimes();
+
+  const weekdays = h('div', { class: 'chips' }, WEEKDAYS.map((w, i) => h('button', {
+    type: 'button', class: 'chip', 'aria-pressed': String((m.weekdays || []).includes(i + 1)), disabled: ro,
+    onclick: (e) => {
+      const on = !(m.weekdays || []).includes(i + 1);
+      m.weekdays = on ? [...(m.weekdays || []), i + 1].sort() : m.weekdays.filter((x) => x !== i + 1);
+      e.currentTarget.setAttribute('aria-pressed', String(on));
+      markDirty();
+    },
+  }, w)));
+  const interval = h('input', { type: 'number', min: '2', max: '90', value: m.interval || 2, disabled: ro, class: 'dose-in', 'aria-label': 'Every n days',
+    oninput: (e) => { m.interval = Math.max(1, Math.round(Number(e.target.value) || 1)); markDirty(); } });
+  const weekBox = h('div', { class: 'field' }, weekdays);
+  const intBox = h('div', { class: 'field row' }, h('span', {}, 'Every'), interval, h('span', {}, 'days, counted from the start date'));
+  const showRepeat = () => { weekBox.hidden = m.repeat !== 'weekdays'; intBox.hidden = m.repeat !== 'interval'; };
+  const repeat = segmented('three', [{ v: 'daily', label: 'Every day' }, { v: 'weekdays', label: 'Weekdays' }, { v: 'interval', label: 'Every n days' }],
+    () => m.repeat, (v) => { m.repeat = v || 'daily'; showRepeat(); markDirty(); }, ro);
+
+  const start = h('input', { type: 'date', id: 'ms', value: m.start || '', disabled: ro, oninput: markDirty });
+  const end = h('input', { type: 'date', id: 'me', value: m.end || '', disabled: ro, oninput: markDirty });
+  const check = (label, get, set) => h('label', { class: 'toggle' },
+    h('input', { type: 'checkbox', checked: get(), disabled: ro, onchange: (e) => { set(e.target.checked); markDirty(); showRemind(); } }), label);
+  const again = h('select', { disabled: ro, onchange: (e) => { m.remind.again = Number(e.target.value); markDirty(); showRemind(); } },
+    [[0, 'No'], [10, 'After 10 min'], [15, 'After 15 min'], [30, 'After 30 min'], [60, 'After 1 hour']]
+      .map(([v, t]) => h('option', { value: v, selected: m.remind.again === v }, t)));
+  const count = h('select', { disabled: ro, onchange: (e) => { m.remind.count = Number(e.target.value); markDirty(); } },
+    [2, 3, 4, 5].map((n) => h('option', { value: n, selected: m.remind.count === n }, `${n} reminders in total`)));
+  const countBox = h('div', { class: 'field' }, h('label', {}, 'At most'), count);
+  const againBox = h('div', { class: 'field' }, h('label', {}, 'Remind again if not taken'), again);
+  function showRemind() {
+    againBox.hidden = !(m.remind.phone || m.remind.watch);
+    countBox.hidden = againBox.hidden || !(m.remind.again > 0);
+    if (m.remind.again > 0 && m.remind.count < 2) { m.remind.count = 3; count.value = '3'; }
+  }
+  const paused = check('Paused (no doses, no reminders)', () => !!m.paused, (v) => { m.paused = v; });
+  const notes = h('textarea', { disabled: ro, oninput: markDirty, placeholder: 'e.g. with food' });
+  notes.value = m.notes || '';
+
+  async function save(extra) {
+    err.textContent = '';
+    const out = { ...m, ...extra };
+    out.name = name.value.trim();
+    out.unit = unit.value.trim();
+    out.start = start.value || todayStr();
+    out.end = end.value || null;
+    out.notes = notes.value.trim() || null;
+    out.times = m.times.filter((t) => t.at).sort((a, b) => a.at.localeCompare(b.at));
+    if (!out.deleted) {
+      if (!out.name) { err.textContent = 'Enter a name.'; return; }
+      if (new Set(out.times.map((t) => t.at)).size !== out.times.length) { err.textContent = 'Each time can be there only once.'; return; }
+      if (out.repeat === 'weekdays' && !(out.weekdays || []).length) { err.textContent = 'Select at least one weekday.'; return; }
+      if (out.end && out.end < out.start) { err.textContent = 'The end must be after the start.'; return; }
+    }
+    if (out.id == null) out.id = nowSec();
+    out.updatedAt = nowSec();
+    try {
+      const saved = await Backend.putMed(out);
+      const i = S.meds.findIndex((x) => x.id === saved.id);
+      if (i >= 0) S.meds[i] = saved; else S.meds.push(saved);
+      store.set('gc.cache.meds', S.meds);
+      dirty = false;
+      toast(out.deleted ? 'Deleted' : 'Saved');
+      location.hash = '#/meds';
+    } catch (e) {
+      toast(e.status ? e.message : 'Could not save: server not reachable');
+    }
+  }
+
+  showRepeat();
+  showRemind();
+  return h('div', {},
+    h('div', { class: 'topbar' },
+      h('a', { class: 'back', href: '#/meds', 'aria-label': 'Back' }, '‹'),
+      h('h1', {}, orig ? orig.name : 'New medication')),
+    h('form', { onsubmit: (e) => { e.preventDefault(); save(); }, novalidate: true },
+      h('div', { class: 'field' }, h('label', { for: 'mn' }, 'Name'), name),
+      h('div', { class: 'field' }, h('label', { for: 'mu' }, 'Unit'), unit, units),
+      h('div', { class: 'field' }, h('div', { class: 'label' }, 'Times and dose'), timesBox,
+        h('button', { type: 'button', class: 'btn small', style: 'margin-top:8px', disabled: ro,
+          onclick: () => { m.times.push({ at: '20:00', dose: m.times[m.times.length - 1]?.dose ?? 1 }); drawTimes(); markDirty(); } }, '+ Add time')),
+      h('div', { class: 'field' }, h('div', { class: 'label' }, 'Days'), repeat),
+      weekBox, intBox,
+      h('div', { class: 'row wrap' },
+        h('div', { class: 'field grow' }, h('label', { for: 'ms' }, 'Start'), start),
+        h('div', { class: 'field grow' }, h('label', { for: 'me' }, 'End (optional)'), end)),
+      h('h2', {}, 'Reminders'),
+      check('On the phone (this app, when reminders are on in Settings)', () => m.remind.phone, (v) => { m.remind.phone = v; }),
+      check('On the watch', () => m.remind.watch, (v) => { m.remind.watch = v; }),
+      againBox, countBox,
+      h('h2', {}, 'More'),
+      paused,
+      h('div', { class: 'field' }, h('label', {}, 'Notes'), notes),
+      err,
+      h('div', { class: 'actions' }, h('a', { class: 'btn ghost', href: '#/meds' }, 'Cancel'), h('button', { class: 'btn primary', type: 'submit', disabled: ro }, 'Save')),
+      orig ? h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn danger', disabled: ro, onclick: () => {
+        if (confirm(`Delete ${orig.name}? Its logged doses stay in the history.`)) save({ deleted: true });
+      } }, 'Delete medication')) : null));
+}
+
+// ------------------------------------------------------------------ phone reminders (Web Push)
+
+const urlKey = (b64) => {
+  const s = atob((b64 + '='.repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+};
+
+function pushPanel() {
+  const box = h('div', { class: 'panel' });
+  // replaceChildren() would show null as text.
+  const show = (...parts) => box.replaceChildren(...parts.filter(Boolean));
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.GC_CONFIG.vapidKey;
+  const ios = /iPhone|iPad/.test(navigator.userAgent);
+  const installed = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  async function draw() {
+    if (!supported) {
+      show(h('div', {}, 'This browser cannot show reminders.'),
+        ios && !installed ? h('div', { class: 'muted small' }, 'On iPhone: tap Share → Add to Home Screen, then open gcluster from the home screen and come back here.') : null);
+      return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub && Notification.permission === 'granted') {
+      show(h('div', {}, 'Reminders are on for this device.'),
+        h('div', { class: 'muted small' }, 'Each medication sets if it reminds on the phone.'),
+        h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { type: 'button', class: 'btn small', onclick: async () => {
+          try { await Backend.deletePush(sub.endpoint); } catch (e) { /* removed on the server later */ }
+          await sub.unsubscribe();
+          toast('Reminders off on this device');
+          draw();
+        } }, 'Turn off on this device')));
+      return;
+    }
+    show(
+      h('div', {}, Notification.permission === 'denied' ? 'Notifications are blocked for this app. Allow them in the browser or system settings.' : 'Reminders are off on this device.'),
+      ios && !installed ? h('div', { class: 'muted small' }, 'On iPhone, reminders work only when gcluster is on the home screen.') : null,
+      h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { type: 'button', class: 'btn small primary', disabled: !S.online || Notification.permission === 'denied', onclick: async () => {
+        try {
+          if (await Notification.requestPermission() !== 'granted') { draw(); return; }
+          const s = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlKey(window.GC_CONFIG.vapidKey) });
+          await Backend.savePush(s, ios ? 'iPhone' : navigator.platform || 'Browser');
+          toast('Reminders on');
+        } catch (e) {
+          toast(e.status ? e.message : `Could not turn on reminders: ${e.message || e}`);
+        }
+        draw();
+      } }, 'Turn on reminders')));
+  }
+  draw().catch(() => show(h('div', { class: 'muted' }, 'Could not check the reminders.')));
+  return box;
 }
 
 // ------------------------------------------------------------------ stats
@@ -919,6 +1263,8 @@ function viewSettings() {
     h('div', { class: 'hint' }, S.lastSync ? `Last loaded ${fmtDate(S.lastSync)} ${fmtTime(S.lastSync)}.` : ''),
     h('h2', {}, 'Watch'),
     devicesPanel(ro),
+    h('h2', {}, 'Medication reminders on this device'),
+    pushPanel(),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
     h('details', { class: 'pwbox' }, h('summary', {}, 'Set or change password'), passwordPanel(ro)),
@@ -926,8 +1272,8 @@ function viewSettings() {
       h('button', { type: 'button', class: 'btn danger', onclick: async () => {
         if (!confirm('Sign out and remove the saved data from this device? Your data stays in your account.')) return;
         await Backend.signOut();
-        for (const k of ['gc.cache.attacks', 'gc.cache.settings', 'gc.cache.time']) store.del(k);
-        S.attacks = []; S.settings = DEFAULT_SETTINGS; S.lastSync = null;
+        for (const k of ['gc.cache.attacks', 'gc.cache.settings', 'gc.cache.time', 'gc.cache.meds', 'gc.cache.doses']) store.del(k);
+        S.attacks = []; S.meds = []; S.doses = []; S.settings = DEFAULT_SETTINGS; S.lastSync = null;
         setOnline(true);
         location.hash = '#/setup';
         render();
