@@ -1353,6 +1353,13 @@ function viewSettings() {
     pushPanel(),
     h('h2', {}, 'Running attack reminder'),
     attackReminderPanel(ro),
+    h('h2', {}, 'About'),
+    h('div', { class: 'panel' },
+      h('div', { class: 'small muted' }, 'Version'),
+      h('div', { class: 'num' }, (() => {
+        const v = window.GC_VERSION || {};
+        return [v.rev || 'dev', v.date].filter(Boolean).join(' · ');
+      })())),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
     h('details', { class: 'pwbox' }, h('summary', {}, 'Set or change password'), passwordPanel(ro)),
