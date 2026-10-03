@@ -1,7 +1,7 @@
 /* gcluster service worker: cache the app shell. Data comes from Supabase;
  * the app keeps its own offline copy in localStorage. */
 // Replaced on each deploy (scripts/deploy-web.sh).
-const VERSION = 'gcluster-c2d2a5f-1790987154';
+const VERSION = 'gcluster-8176f2b-1790987276';
 const SHELL = [
   './', 'index.html', 'version.js', 'config.js', 'backend.js', 'schedule.js', 'app.js', 'style.css', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
@@ -16,7 +16,8 @@ self.addEventListener('install', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+      // Only our own old caches: other apps on jonasnoki.github.io share this origin.
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('gcluster-') && k !== VERSION).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
