@@ -631,12 +631,13 @@ function adherence(meds, doses, now) {
     let due = 0, taken = 0;
     const cells = days.map((day) => {
       const list = Sched.dosesOn([m], day).filter((d) => overdue(d, null, now));
-      if (!list.length) return h('i', { class: 'cell none', title: `${fmtDayShort(day)}: not scheduled` });
+      const cell = (cls, title) => h('a', { class: 'cell ' + cls, title, href: `#/meds/${day}`, 'aria-label': title });
+      if (!list.length) return cell('none', `${fmtDayShort(day)}: not scheduled`);
       const t = list.filter((d) => doses[d.id] && !doses[d.id].deleted && doses[d.id].status === 'taken').length;
       const sk = list.filter((d) => doses[d.id] && !doses[d.id].deleted && doses[d.id].status === 'skipped').length;
       due += list.length; taken += t;
       const cls = t === list.length ? 'all' : t + sk === list.length ? 'skip' : t > 0 ? 'part' : 'miss';
-      return h('i', { class: 'cell ' + cls, title: `${fmtDayShort(day)}: ${t} of ${list.length} taken${sk ? `, ${sk} skipped` : ''}` });
+      return cell(cls, `${fmtDayShort(day)}: ${t} of ${list.length} taken${sk ? `, ${sk} skipped` : ''}`);
     });
     return h('div', { class: 'adh-row' },
       h('span', { class: 'name' }, m.name),
@@ -672,8 +673,7 @@ function viewMeds(dayArg) {
     return t > now.day || t < minDay ? null : `#/meds/${t}`;
   };
   const prev = nav(-1), next = nav(1);
-  return h('div', { class: 'meds' },
-    h('div', { class: 'eyebrow' }, 'Medication'),
+  const dayView = h('div', { class: 'swipe-day' + (swipeIn ? ` in-${swipeIn}` : '') },
     h('div', { class: 'daynav' },
       prev ? h('a', { class: 'back', href: prev, 'aria-label': 'Day before' }, '‹') : h('span', { class: 'back' }),
       h('h1', {}, day === now.day ? 'Today' : day === Sched.addDays(now.day, -1) ? 'Yesterday' : fmtDayShort(day),
@@ -681,7 +681,12 @@ function viewMeds(dayArg) {
       next ? h('a', { class: 'back', href: next, 'aria-label': 'Next day' }, '›') : h('span', { class: 'back' })),
     !meds.length
       ? h('div', { class: 'empty' }, S.loaded ? 'No medication yet. Add one below.' : 'Loading…')
-      : list.length ? groups : h('div', { class: 'empty' }, 'Nothing scheduled on this day.'),
+      : list.length ? groups : h('div', { class: 'empty' }, 'Nothing scheduled on this day.'));
+  swipeIn = null;
+  swipeDays(dayView, prev, next);
+  return h('div', { class: 'meds' },
+    h('div', { class: 'eyebrow' }, 'Medication'),
+    dayView,
     meds.length ? [h('h2', {}, 'Last 14 days'), adherence(meds, doses, now)] : null,
     h('h2', {}, 'Medications'),
     h('div', { class: 'list' }, meds.map((m) => h('a', { class: 'card', href: `#/med/${m.id}` },
@@ -692,6 +697,44 @@ function viewMeds(dayArg) {
           h('div', { class: 'muted small' }, repeatText(m), ' · ', remindText(m))))))),
     h('div', { style: 'margin-top:12px' }, h('a', { class: 'btn block', href: '#/med/new', 'aria-disabled': ro ? 'true' : null }, '+ Add medication')),
   );
+}
+
+/** Direction the next day view slides in from, after a swipe. */
+let swipeIn = null;
+
+/** Swipe from the left: the day before; from the right: the next day.
+ *  The day follows the finger; a mostly vertical move stays a scroll. */
+function swipeDays(el, prev, next) {
+  let x0 = null, y0 = 0, dx = 0, horizontal = null;
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; horizontal = null;
+    el.style.transition = 'none';
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (x0 == null) return;
+    const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+    if (horizontal == null && Math.abs(mx) + Math.abs(my) > 10) horizontal = Math.abs(mx) > Math.abs(my);
+    if (!horizontal) return;
+    e.preventDefault();
+    // Resist where there is no day to go to.
+    dx = (mx > 0 && !prev) || (mx < 0 && !next) ? mx / 4 : mx;
+    el.style.transform = `translateX(${dx}px)`;
+    el.style.opacity = String(1 - Math.min(0.5, Math.abs(dx) / 600));
+  }, { passive: false });
+  const end = () => {
+    if (x0 == null) return;
+    x0 = null;
+    const go = dx > 70 ? prev : dx < -70 ? next : null;
+    el.style.transition = 'transform .18s ease-out, opacity .18s ease-out';
+    if (!go) { el.style.transform = ''; el.style.opacity = ''; return; }
+    el.style.transform = `translateX(${dx > 0 ? '100%' : '-100%'})`;
+    el.style.opacity = '0';
+    swipeIn = dx > 0 ? 'left' : 'right';
+    setTimeout(() => { location.hash = go; }, 160);
+  };
+  el.addEventListener('touchend', end);
+  el.addEventListener('touchcancel', end);
 }
 
 function repeatText(m) {
