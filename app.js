@@ -1376,13 +1376,43 @@ function viewSettings() {
   );
 }
 
+// ------------------------------------------------------------------ updates
+
+/** Each deploy has a new service worker (scripts/deploy-web.sh). When it
+ *  takes over, reload, but not over a form with unsaved changes: then wait
+ *  until it is saved or left. */
+function watchUpdates() {
+  if (!('serviceWorker' in navigator)) return;
+  const hadController = !!navigator.serviceWorker.controller; // the first install needs no reload
+  navigator.serviceWorker.register('sw.js').then((reg) => reg.update()).catch(() => { /* e.g. file:// or private mode */ });
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return;
+    const tryReload = () => { if (dirty) setTimeout(tryReload, 2000); else location.reload(); };
+    tryReload();
+  });
+  // iOS resumes the old page instead of starting the app again, so also
+  // look for a new version on resume and every minute while open.
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+  setInterval(() => { if (document.visibilityState === 'visible') checkForUpdate(); }, 60000);
+}
+
+/** Compares the deployed version.js with this page's version; on a
+ *  difference, the browser fetches the new service worker. */
+async function checkForUpdate() {
+  try {
+    const text = await (await fetch(`version.js?t=${Date.now()}`, { cache: 'no-store' })).text();
+    const rev = (text.match(/rev: '([^']*)'/) || [])[1];
+    if (!rev || rev === (window.GC_VERSION || {}).rev) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.update();
+  } catch (e) { /* offline: try again later */ }
+}
+
 // ------------------------------------------------------------------ boot
 
 async function boot() {
   Backend.takeSessionFromUrl();
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => { /* e.g. file:// or private mode */ });
-  }
+  watchUpdates();
   render();
   if (Backend.signedIn()) {
     await refresh();

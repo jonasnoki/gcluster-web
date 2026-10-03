@@ -1,7 +1,7 @@
 /* gcluster service worker: cache the app shell. Data comes from Supabase;
  * the app keeps its own offline copy in localStorage. */
 // Replaced on each deploy (scripts/deploy-web.sh).
-const VERSION = 'gcluster-8176f2b-1790987276';
+const VERSION = 'gcluster-f71696f-1790988181';
 const SHELL = [
   './', 'index.html', 'version.js', 'config.js', 'backend.js', 'schedule.js', 'app.js', 'style.css', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
@@ -40,6 +40,8 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   // Only the app's own files; API calls always go to the network.
+  // cache: 'no-store' (the update check in app.js) always goes to the network.
+  if (req.cache === 'no-store') return;
   if (new URL(req.url).origin === self.location.origin) e.respondWith(shellFirst(req));
 });
 
