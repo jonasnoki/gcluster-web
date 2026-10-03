@@ -694,7 +694,7 @@ function viewMeds(dayArg) {
         h('div', { class: 'grow' },
           h('div', { class: 'date' }, m.name, m.paused ? h('span', { class: 'badge', style: 'margin-left:8px' }, 'paused') : null),
           h('div', { class: 'time' }, (m.times || []).map((t) => `${t.at} ${Sched.doseText(t.dose, m.unit)}`).join(' · ')),
-          h('div', { class: 'muted small' }, repeatText(m), ' · ', remindText(m))))))),
+          h('div', { class: 'muted small' }, repeatText(m))))))),
     h('div', { style: 'margin-top:12px' }, h('a', { class: 'btn block', href: '#/med/new', 'aria-disabled': ro ? 'true' : null }, '+ Add medication')),
   );
 }
@@ -742,17 +742,64 @@ function repeatText(m) {
   if (m.repeat === 'interval') return `every ${m.interval || 1} days`;
   return 'every day';
 }
-function remindText(m) {
-  const r = m.remind || {};
-  const where = [r.phone ? 'phone' : null, r.watch ? 'watch' : null].filter(Boolean);
-  if (!where.length) return 'no reminder';
-  return `reminder on ${where.join(' and ')}${r.again > 0 ? `, again every ${r.again} min (${r.count}×)` : ''}`;
+/** The medication reminder setting (Settings), the same for all medications.
+ *  The reminder function and the watch read it from each medication's
+ *  `remind`, so a change is copied into every medication. */
+const MED_REMINDER = { phone: true, watch: true, again: 30, count: 3 };
+function medReminder() {
+  const first = visibleMeds()[0];
+  const r = { ...MED_REMINDER, ...((first && first.remind) || {}), ...(S.settings.medReminder || {}) };
+  return { phone: !!r.phone, watch: !!r.watch, again: r.count > 1 ? r.again || 30 : 0, count: r.again > 0 ? r.count : 1 };
+}
+
+/** Saves the setting and copies it into each medication that differs. */
+async function saveMedReminder(cfg) {
+  S.settings = { ...DEFAULT_SETTINGS, ...(await Backend.putSettings({ ...S.settings, medReminder: cfg })) };
+  store.set('gc.cache.settings', S.settings);
+  for (const m of visibleMeds()) {
+    const r = m.remind || {};
+    if (['phone', 'watch', 'again', 'count'].every((k) => r[k] === cfg[k])) continue;
+    const saved = await Backend.putMed({ ...m, remind: cfg, updatedAt: nowSec() });
+    S.meds[S.meds.findIndex((x) => x.id === saved.id)] = saved;
+  }
+  store.set('gc.cache.meds', S.meds);
+}
+
+function medReminderPanel(ro) {
+  const cfg = medReminder();
+  const box = h('div', { class: 'panel' });
+  async function save(patch) {
+    Object.assign(cfg, patch);
+    try {
+      await saveMedReminder({ ...cfg });
+      toast('Saved');
+    } catch (e) {
+      toast(e.status ? e.message : 'Could not save: server not reachable');
+    }
+    draw();
+  }
+  const select = (value, options, onchange) => h('select', { disabled: ro, onchange: (e) => onchange(Number(e.target.value)) },
+    options.map(([v, t]) => h('option', { value: v, selected: value === v }, t)));
+  function draw() {
+    box.replaceChildren(
+      h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'For all medications: a reminder at the dose time, and again while the dose is not taken or skipped.'),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.phone, disabled: ro, onchange: (e) => save({ phone: e.target.checked }) }), 'On the phone'),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.watch, disabled: ro, onchange: (e) => save({ watch: e.target.checked }) }), 'On the watch'),
+      cfg.phone || cfg.watch ? h('div', { class: 'row wrap' },
+        h('div', { class: 'field grow' }, h('label', {}, 'Reminders in total'),
+          select(cfg.count, [[1, '1 (only at the time)'], [2, '2'], [3, '3'], [4, '4'], [5, '5']],
+            (v) => save(v > 1 ? { count: v, again: cfg.again > 0 ? cfg.again : 30 } : { count: 1, again: 0 }))),
+        cfg.count > 1 ? h('div', { class: 'field grow' }, h('label', {}, 'Remind again after'),
+          select(cfg.again, [[10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 hour']], (v) => save({ again: v }))) : null) : null);
+  }
+  draw();
+  return box;
 }
 
 function newMed() {
   return {
     id: null, name: '', unit: 'pill', times: [{ at: '08:00', dose: 1 }], repeat: 'daily', weekdays: [1, 2, 3, 4, 5, 6, 7], interval: 2,
-    start: todayStr(), end: null, paused: false, remind: { phone: true, watch: true, again: 30, count: 3 }, notes: null, deleted: false,
+    start: todayStr(), end: null, paused: false, notes: null, deleted: false,
   };
 }
 
@@ -760,7 +807,6 @@ function viewMedEdit(idArg) {
   const orig = idArg === 'new' ? null : S.meds.find((m) => String(m.id) === idArg && !m.deleted);
   if (idArg !== 'new' && !orig) return h('div', {}, h('p', { class: 'empty' }, 'Medication not found.'), h('a', { class: 'btn block', href: '#/meds' }, 'Back'));
   const m = orig ? JSON.parse(JSON.stringify(orig)) : newMed();
-  m.remind = { phone: false, watch: false, again: 0, count: 1, ...(m.remind || {}) };
   if (!(m.weekdays || []).length) m.weekdays = [1, 2, 3, 4, 5, 6, 7];
   const ro = !S.online;
   const markDirty = () => { dirty = true; };
@@ -801,25 +847,7 @@ function viewMedEdit(idArg) {
   const start = h('input', { type: 'date', id: 'ms', value: m.start || '', disabled: ro, oninput: markDirty });
   const end = h('input', { type: 'date', id: 'me', value: m.end || '', disabled: ro, oninput: markDirty });
   const check = (label, get, set) => h('label', { class: 'toggle' },
-    h('input', { type: 'checkbox', checked: get(), disabled: ro, onchange: (e) => { set(e.target.checked); markDirty(); showRemind(); } }), label);
-  // One reminder means no repeat (again = 0); more need an interval.
-  if (!(m.remind.again > 0)) m.remind.count = 1;
-  const count = h('select', { disabled: ro, onchange: (e) => {
-    m.remind.count = Number(e.target.value);
-    if (m.remind.count > 1 && !(m.remind.again > 0)) { m.remind.again = 30; again.value = '30'; }
-    if (m.remind.count === 1) m.remind.again = 0;
-    markDirty(); showRemind();
-  } }, [[1, '1 (only at the time)'], [2, '2'], [3, '3'], [4, '4'], [5, '5']]
-    .map(([n, t]) => h('option', { value: n, selected: m.remind.count === n }, t)));
-  const again = h('select', { disabled: ro, onchange: (e) => { m.remind.again = Number(e.target.value); markDirty(); } },
-    [[10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 hour']]
-      .map(([v, t]) => h('option', { value: v, selected: m.remind.again === v }, t)));
-  const countBox = h('div', { class: 'field' }, h('label', {}, 'Reminders in total, if not taken'), count);
-  const againBox = h('div', { class: 'field' }, h('label', {}, 'Remind again after'), again);
-  function showRemind() {
-    countBox.hidden = !(m.remind.phone || m.remind.watch);
-    againBox.hidden = countBox.hidden || !(m.remind.count > 1);
-  }
+    h('input', { type: 'checkbox', checked: get(), disabled: ro, onchange: (e) => { set(e.target.checked); markDirty(); } }), label);
   const paused = check('Paused (no doses, no reminders)', () => !!m.paused, (v) => { m.paused = v; });
   const notes = h('textarea', { disabled: ro, oninput: markDirty, placeholder: 'e.g. with food' });
   notes.value = m.notes || '';
@@ -840,6 +868,7 @@ function viewMedEdit(idArg) {
       if (out.end && out.end < out.start) { err.textContent = 'The end must be after the start.'; return; }
     }
     if (out.id == null) out.id = nowSec();
+    out.remind = medReminder();
     out.updatedAt = nowSec();
     try {
       const saved = await Backend.putMed(out);
@@ -855,7 +884,6 @@ function viewMedEdit(idArg) {
   }
 
   showRepeat();
-  showRemind();
   return h('div', {},
     h('div', { class: 'topbar' },
       h('a', { class: 'back', href: '#/meds', 'aria-label': 'Back' }, '‹'),
@@ -871,10 +899,7 @@ function viewMedEdit(idArg) {
       h('div', { class: 'row wrap' },
         h('div', { class: 'field grow' }, h('label', { for: 'ms' }, 'Start'), start),
         h('div', { class: 'field grow' }, h('label', { for: 'me' }, 'End (optional)'), end)),
-      h('h2', {}, 'Reminders'),
-      check('On the phone (this app, when reminders are on in Settings)', () => m.remind.phone, (v) => { m.remind.phone = v; }),
-      check('On the watch', () => m.remind.watch, (v) => { m.remind.watch = v; }),
-      countBox, againBox,
+      h('p', { class: 'muted small' }, 'Reminders: one setting for all medications, in ', h('a', { href: '#/settings' }, 'Settings'), '.'),
       h('h2', {}, 'More'),
       paused,
       h('div', { class: 'field' }, h('label', {}, 'Notes'), notes),
@@ -1359,6 +1384,8 @@ function viewSettings() {
     h('h2', {}, 'Reminders on this device'),
     h('p', { class: 'muted small' }, 'Phone reminders (medication and a running attack) need this on.'),
     pushPanel(),
+    h('h2', {}, 'Medication reminders'),
+    medReminderPanel(ro),
     h('h2', {}, 'Running attack reminder'),
     attackReminderPanel(ro),
     h('h2', {}, 'About'),
