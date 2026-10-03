@@ -1,7 +1,7 @@
 /* gcluster service worker: cache the app shell. Data comes from Supabase;
  * the app keeps its own offline copy in localStorage. */
 // Replaced on each deploy (scripts/deploy-web.sh).
-const VERSION = 'gcluster-1.0.0-d73448e';
+const VERSION = 'gcluster-1.0.1-a7b339d';
 const SHELL = [
   './', 'index.html', 'version.js', 'config.js', 'backend.js', 'schedule.js', 'app.js', 'style.css', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',

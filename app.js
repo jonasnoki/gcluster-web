@@ -1366,7 +1366,7 @@ function viewSettings() {
       h('div', { class: 'small muted' }, 'Version'),
       h('div', { class: 'num' }, (() => {
         const v = window.GC_VERSION || {};
-        return `${v.version || '?'} (${[v.rev || 'dev', v.date].filter(Boolean).join(' · ')})`;
+        return v.version || '?';
       })())),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
