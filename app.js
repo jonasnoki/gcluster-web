@@ -802,17 +802,23 @@ function viewMedEdit(idArg) {
   const end = h('input', { type: 'date', id: 'me', value: m.end || '', disabled: ro, oninput: markDirty });
   const check = (label, get, set) => h('label', { class: 'toggle' },
     h('input', { type: 'checkbox', checked: get(), disabled: ro, onchange: (e) => { set(e.target.checked); markDirty(); showRemind(); } }), label);
-  const again = h('select', { disabled: ro, onchange: (e) => { m.remind.again = Number(e.target.value); markDirty(); showRemind(); } },
-    [[0, 'No'], [10, 'After 10 min'], [15, 'After 15 min'], [30, 'After 30 min'], [60, 'After 1 hour']]
+  // One reminder means no repeat (again = 0); more need an interval.
+  if (!(m.remind.again > 0)) m.remind.count = 1;
+  const count = h('select', { disabled: ro, onchange: (e) => {
+    m.remind.count = Number(e.target.value);
+    if (m.remind.count > 1 && !(m.remind.again > 0)) { m.remind.again = 30; again.value = '30'; }
+    if (m.remind.count === 1) m.remind.again = 0;
+    markDirty(); showRemind();
+  } }, [[1, '1 (only at the time)'], [2, '2'], [3, '3'], [4, '4'], [5, '5']]
+    .map(([n, t]) => h('option', { value: n, selected: m.remind.count === n }, t)));
+  const again = h('select', { disabled: ro, onchange: (e) => { m.remind.again = Number(e.target.value); markDirty(); } },
+    [[10, '10 min'], [15, '15 min'], [30, '30 min'], [60, '1 hour']]
       .map(([v, t]) => h('option', { value: v, selected: m.remind.again === v }, t)));
-  const count = h('select', { disabled: ro, onchange: (e) => { m.remind.count = Number(e.target.value); markDirty(); } },
-    [2, 3, 4, 5].map((n) => h('option', { value: n, selected: m.remind.count === n }, `${n} reminders in total`)));
-  const countBox = h('div', { class: 'field' }, h('label', {}, 'At most'), count);
-  const againBox = h('div', { class: 'field' }, h('label', {}, 'Remind again if not taken'), again);
+  const countBox = h('div', { class: 'field' }, h('label', {}, 'Reminders in total, if not taken'), count);
+  const againBox = h('div', { class: 'field' }, h('label', {}, 'Remind again after'), again);
   function showRemind() {
-    againBox.hidden = !(m.remind.phone || m.remind.watch);
-    countBox.hidden = againBox.hidden || !(m.remind.again > 0);
-    if (m.remind.again > 0 && m.remind.count < 2) { m.remind.count = 3; count.value = '3'; }
+    countBox.hidden = !(m.remind.phone || m.remind.watch);
+    againBox.hidden = countBox.hidden || !(m.remind.count > 1);
   }
   const paused = check('Paused (no doses, no reminders)', () => !!m.paused, (v) => { m.paused = v; });
   const notes = h('textarea', { disabled: ro, oninput: markDirty, placeholder: 'e.g. with food' });
@@ -868,7 +874,7 @@ function viewMedEdit(idArg) {
       h('h2', {}, 'Reminders'),
       check('On the phone (this app, when reminders are on in Settings)', () => m.remind.phone, (v) => { m.remind.phone = v; }),
       check('On the watch', () => m.remind.watch, (v) => { m.remind.watch = v; }),
-      againBox, countBox,
+      countBox, againBox,
       h('h2', {}, 'More'),
       paused,
       h('div', { class: 'field' }, h('label', {}, 'Notes'), notes),
@@ -906,9 +912,11 @@ function attackReminderPanel(ro) {
       on ? h('div', { class: 'row wrap' },
         h('div', { class: 'field grow' }, h('label', {}, 'After'),
           select(cfg.after, [[30, '30 min'], [60, '1 hour'], [90, '1.5 hours'], [120, '2 hours'], [180, '3 hours'], [240, '4 hours']], (v) => save({ after: v }))),
-        h('div', { class: 'field grow' }, h('label', {}, 'Then again'),
-          select(cfg.again > 0 ? cfg.again : 0, [[0, 'No'], [30, 'Every 30 min, 3 times in total'], [60, 'Every hour, 3 times in total']],
-            (v) => save({ again: v, count: v > 0 ? 3 : 1 })))) : null);
+        h('div', { class: 'field grow' }, h('label', {}, 'Reminders in total'),
+          select(cfg.again > 0 ? cfg.count : 1, [[1, '1 (only once)'], [2, '2'], [3, '3'], [4, '4']],
+            (v) => save(v > 1 ? { count: v, again: cfg.again > 0 ? cfg.again : 60 } : { count: 1, again: 0 }))),
+        cfg.again > 0 ? h('div', { class: 'field grow' }, h('label', {}, 'Remind again after'),
+          select(cfg.again, [[30, '30 min'], [60, '1 hour'], [120, '2 hours']], (v) => save({ again: v }))) : null) : null);
   }
   draw();
   return box;
@@ -1358,7 +1366,7 @@ function viewSettings() {
       h('div', { class: 'small muted' }, 'Version'),
       h('div', { class: 'num' }, (() => {
         const v = window.GC_VERSION || {};
-        return [v.rev || 'dev', v.date].filter(Boolean).join(' · ');
+        return `${v.version || '?'} (${[v.rev || 'dev', v.date].filter(Boolean).join(' · ')})`;
       })())),
     h('h2', {}, 'Account'),
     h('div', { class: 'panel' }, h('div', { class: 'small muted' }, 'Signed in as'), h('div', {}, Backend.email() || '')),
@@ -1401,8 +1409,10 @@ function watchUpdates() {
 async function checkForUpdate() {
   try {
     const text = await (await fetch(`version.js?t=${Date.now()}`, { cache: 'no-store' })).text();
-    const rev = (text.match(/rev: '([^']*)'/) || [])[1];
-    if (!rev || rev === (window.GC_VERSION || {}).rev) return;
+    // Version and commit: a redeploy of the same version with other code counts too.
+    const id = (t) => [(t.match(/version: '([^']*)'/) || [])[1], (t.match(/rev: '([^']*)'/) || [])[1]].join('/');
+    const v = window.GC_VERSION || {};
+    if (!(text.match(/rev: '([^']*)'/) || [])[1] || id(text) === `${v.version}/${v.rev}`) return;
     const reg = await navigator.serviceWorker.getRegistration();
     if (reg) await reg.update();
   } catch (e) { /* offline: try again later */ }
