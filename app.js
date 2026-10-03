@@ -164,11 +164,13 @@ function route() {
 }
 
 let dirty = false; // unsaved edit form
-function render() {
+/** keepScroll: a redraw for new data, not a new page; stays where it was. */
+function render({ keepScroll = false } = {}) {
   const view = document.getElementById('view');
   const tabs = document.getElementById('tabs');
   const r = route();
-  window.scrollTo(0, 0);
+  const y = window.scrollY;
+  if (!keepScroll) window.scrollTo(0, 0);
   dirty = false;
   if (!Backend.signedIn() || r.name === 'setup') {
     tabs.hidden = true;
@@ -198,7 +200,16 @@ function render() {
     }
   }
   view.classList.toggle('wide-split', WIDE.matches && listRoute);
-  view.replaceChildren(content);
+  if (keepScroll) {
+    // Hold the old height while swapping, so the page does not shrink and
+    // jump (on iOS that also misplaces the fixed tab bar).
+    view.style.minHeight = `${view.offsetHeight}px`;
+    view.replaceChildren(content);
+    if (window.scrollY !== y) window.scrollTo(0, y);
+    requestAnimationFrame(() => { view.style.minHeight = ''; });
+  } else {
+    view.replaceChildren(content);
+  }
 }
 
 /** Desktop layout from this width on (sidebar, list and detail side by side). */
@@ -580,7 +591,7 @@ function upsertDoseLocal(d) {
 async function saveDose(d) {
   try {
     upsertDoseLocal(await Backend.putDose(d));
-    render();
+    render({ keepScroll: true });
   } catch (e) {
     if (!e.status) setOnline(false);
     toast(e.status ? e.message : 'Could not save: server not reachable');
@@ -742,6 +753,26 @@ function repeatText(m) {
   if (m.repeat === 'interval') return `every ${m.interval || 1} days`;
   return 'every day';
 }
+/** A main switch for a reminder (phone and watch together; half filled when
+ *  only one is on), with › to set phone and watch one by one. */
+const openGroups = new Set();
+function channelSwitch(id, label, cfg, ro, save, redraw) {
+  const sw = (checked, onchange, aria) => h('input', { type: 'checkbox', class: 'switch', checked, disabled: ro, 'aria-label': aria, onchange });
+  const on = (cfg.phone ? 1 : 0) + (cfg.watch ? 1 : 0);
+  const open = openGroups.has(id);
+  const head = h('div', { class: 'switch-row' },
+    h('button', { type: 'button', class: 'expand' + (open ? ' open' : ''), 'aria-expanded': String(open), 'aria-label': 'Phone and watch one by one',
+      onclick: () => { if (open) openGroups.delete(id); else openGroups.add(id); redraw(); } }, '›'),
+    h('span', { class: 'grow' }, h('span', {}, label),
+      h('span', { class: 'small muted' }, on === 2 ? 'Phone and watch' : cfg.phone ? 'Phone only' : cfg.watch ? 'Watch only' : 'Off')),
+    sw(on > 0, (e) => save({ phone: e.target.checked, watch: e.target.checked }), label));
+  if (on === 1) head.querySelector('.switch').classList.add('partial');
+  const item = (key, text) => h('label', { class: 'switch-row sub' }, h('span', { class: 'grow' }, text),
+    sw(!!cfg[key], (e) => save({ [key]: e.target.checked }), text));
+  return h('div', { class: 'switch-group' }, head,
+    open ? h('div', { class: 'switch-subs' }, item('phone', 'On the phone'), item('watch', 'On the watch')) : null);
+}
+
 /** The medication reminder setting (Settings), the same for all medications.
  *  The reminder function and the watch read it from each medication's
  *  `remind`, so a change is copied into every medication. */
@@ -782,9 +813,8 @@ function medReminderPanel(ro) {
     options.map(([v, t]) => h('option', { value: v, selected: value === v }, t)));
   function draw() {
     box.replaceChildren(
-      h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'For all medications: a reminder at the dose time, and again while the dose is not taken or skipped.'),
-      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.phone, disabled: ro, onchange: (e) => save({ phone: e.target.checked }) }), 'On the phone'),
-      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.watch, disabled: ro, onchange: (e) => save({ watch: e.target.checked }) }), 'On the watch'),
+      channelSwitch('med', 'Medication reminders', cfg, ro, save, draw),
+      h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'For all medications: at the dose time, and again while the dose is not taken or skipped.'),
       cfg.phone || cfg.watch ? h('div', { class: 'row wrap' },
         h('div', { class: 'field grow' }, h('label', {}, 'Reminders in total'),
           select(cfg.count, [[1, '1 (only at the time)'], [2, '2'], [3, '3'], [4, '4'], [5, '5']],
@@ -931,9 +961,8 @@ function attackReminderPanel(ro) {
   function draw() {
     const on = cfg.phone || cfg.watch;
     box.replaceChildren(
+      channelSwitch('attack', 'Running attack reminder', cfg, ro, save, draw),
       h('p', { class: 'muted small', style: 'margin:0 0 8px' }, 'If an attack timer is still running after some time, you get a reminder to end it.'),
-      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.phone, disabled: ro, onchange: (e) => save({ phone: e.target.checked }) }), 'On the phone'),
-      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: cfg.watch, disabled: ro, onchange: (e) => save({ watch: e.target.checked }) }), 'On the watch'),
       on ? h('div', { class: 'row wrap' },
         h('div', { class: 'field grow' }, h('label', {}, 'After'),
           select(cfg.after, [[30, '30 min'], [60, '1 hour'], [90, '1.5 hours'], [120, '2 hours'], [180, '3 hours'], [240, '4 hours']], (v) => save({ after: v }))),
@@ -1384,9 +1413,8 @@ function viewSettings() {
     h('h2', {}, 'Reminders on this device'),
     h('p', { class: 'muted small' }, 'Phone reminders (medication and a running attack) need this on.'),
     pushPanel(),
-    h('h2', {}, 'Medication reminders'),
+    h('h2', {}, 'What reminds you'),
     medReminderPanel(ro),
-    h('h2', {}, 'Running attack reminder'),
     attackReminderPanel(ro),
     h('h2', {}, 'About'),
     h('div', { class: 'panel' },
@@ -1455,13 +1483,13 @@ async function boot() {
     await refresh();
     const r = route().name;
     // don't wipe a form the user already started typing into
-    if (!(dirty && (r === 'attack' || r === 'new'))) render();
+    if (!(dirty && (r === 'attack' || r === 'new'))) render({ keepScroll: true });
   }
 }
 
-window.addEventListener('online', () => { if (Backend.signedIn()) refresh().then(() => { if (!dirty) render(); }); });
+window.addEventListener('online', () => { if (Backend.signedIn()) refresh().then(() => { if (!dirty) render({ keepScroll: true }); }); });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && Backend.signedIn() && !dirty) refresh().then(() => { if (!dirty) render(); });
+  if (document.visibilityState === 'visible' && Backend.signedIn() && !dirty) refresh().then(() => { if (!dirty) render({ keepScroll: true }); });
 });
 
 boot();

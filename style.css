@@ -119,6 +119,8 @@ h2 { font-size: 1.25rem; line-height: 1.25; margin: 28px 0 10px; }
 /* tab bar */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  /* own layer: iOS home-screen apps otherwise paint it at a stale spot while scrolling */
+  transform: translateZ(0); will-change: transform;
   display: flex; background: var(--surface); border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -239,6 +241,40 @@ input:disabled, select:disabled, textarea:disabled { opacity: .6; }
 }
 .editlist li span { flex: 1; }
 .editlist button { min-width: 44px; min-height: 44px; border: 0; background: none; color: var(--muted); font-size: 1.3rem; cursor: pointer; }
+
+/* Covers the area under the status bar (black-translucent), so content
+   does not scroll visibly under the clock. */
+body::before {
+  content: ""; position: fixed; top: 0; left: 0; right: 0; z-index: 35;
+  height: env(safe-area-inset-top); background: var(--bg);
+  transform: translateZ(0);
+}
+
+/* switches (same component as putztagebuch) */
+.switch-row { display: flex; align-items: center; gap: 12px; min-height: 56px; cursor: pointer; }
+.switch-row .grow { display: flex; flex-direction: column; gap: 2px; }
+.block { display: block; }
+.switch {
+  appearance: none; -webkit-appearance: none; flex: none;
+  width: 50px; height: 30px; border-radius: 999px; background: var(--border); position: relative; cursor: pointer;
+  transition: background .15s ease; margin: 0;
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s ease;
+}
+.switch:checked { background: var(--accent); }
+.switch:checked::after { transform: translateX(20px); }
+.switch:disabled { opacity: .5; }
+.switch.partial { background: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.switch-group { border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.switch-subs { padding: 0 0 8px 36px; }
+.switch-row.sub { min-height: 48px; }
+.expand {
+  flex: none; width: 28px; height: 28px; margin-left: -6px; border: 0; background: none; cursor: pointer;
+  color: var(--muted); font-size: 1.4rem; line-height: 1; transition: transform .15s ease;
+}
+.expand.open { transform: rotate(90deg); }
 
 /* medication */
 .swipe-day { touch-action: pan-y; will-change: transform; }
