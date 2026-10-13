@@ -1,1 +1,1 @@
-window.GC_VERSION = { version: '1.2.0', rev: 'f164d8c', date: '2026-10-03' };
+window.GC_VERSION = { version: '1.2.1', rev: '5980c91', date: '2026-10-13' };

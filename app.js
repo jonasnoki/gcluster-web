@@ -1480,16 +1480,30 @@ async function boot() {
   watchUpdates();
   render();
   if (Backend.signedIn()) {
+    const before = viewData();
     await refresh();
-    const r = route().name;
     // don't wipe a form the user already started typing into
-    if (!(dirty && (r === 'attack' || r === 'new'))) render({ keepScroll: true });
+    if (!dirty && viewData() !== before) render({ keepScroll: true });
   }
 }
 
-window.addEventListener('online', () => { if (Backend.signedIn()) refresh().then(() => { if (!dirty) render({ keepScroll: true }); }); });
+/** What the views show; a redraw that would not change it only makes the page flicker. */
+const viewData = () => JSON.stringify([S.attacks, S.meds, S.doses, S.settings, S.online, S.loaded]);
+/** Routes with a form: a background refresh never rebuilds them, typed in or not. */
+const FORM_ROUTES = ['attack', 'new', 'med', 'settings'];
+
+/** Refresh on resume or reconnect: redraw only for changed data and never over a form. */
+async function refreshInBackground() {
+  if (!Backend.signedIn() || dirty) return;
+  const before = viewData();
+  await refresh();
+  if (dirty || FORM_ROUTES.includes(route().name) || viewData() === before) return;
+  render({ keepScroll: true });
+}
+
+window.addEventListener('online', refreshInBackground);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && Backend.signedIn() && !dirty) refresh().then(() => { if (!dirty) render({ keepScroll: true }); });
+  if (document.visibilityState === 'visible') refreshInBackground();
 });
 
 boot();
